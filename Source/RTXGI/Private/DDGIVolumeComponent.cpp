@@ -36,7 +36,6 @@
 DECLARE_GPU_STAT_NAMED(RTXGI_Update, TEXT("RTXGI Update"));
 DECLARE_GPU_STAT_NAMED(RTXGI_ApplyLighting, TEXT("RTXGI Apply Lighting"));
 DECLARE_GPU_STAT_NAMED(RTXGI_UpscaleLighting, TEXT("RTXGI Upscale Lighting"));
-DECLARE_GPU_STAT_NAMED(RTXGI_SGProjection, TEXT("RTXGI SG Projection"));
 DECLARE_GPU_STAT_NAMED(RTXGI_SGApplyLighting, TEXT("RTXGI SG Apply Lighting"));
 
 static TAutoConsoleVariable<bool> CVarUseDDGI(
@@ -347,9 +346,6 @@ void FDDGIVolumeSceneProxy::ReallocateSurfaces_RenderThread(FRHICommandListImmed
 	// SG amplitudes - allocated only when SG metadata is enabled. Default DDGI keeps this released.
 	if (ComponentData.bSGEnabled)
 	{
-		SCOPED_GPU_STAT(RHICmdList, RTXGI_SGProjection);
-		SCOPED_DRAW_EVENT(RHICmdList, RTXGI_SGAmplitudeAllocation);
-
 		FIntPoint ProxyTexDims = GetSGAmplitudeTextureDimensions(ComponentData.ProbeCounts, ComponentData.SGLobeCount);
 		EPixelFormat Format = (ComponentData.SGPrecision == 1) ? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth : FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
 

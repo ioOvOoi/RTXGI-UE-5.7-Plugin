@@ -8,18 +8,27 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
+#include "/Engine/Public/Platform.ush"
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
 #ifndef SG_LOBE_COUNT
 #define SG_LOBE_COUNT 12
 #endif
 
-// Skeleton compute shader for future DDGI ray-radiance to fixed-basis SG amplitude projection.
-// Projection resources and dispatch are intentionally added in later tasks (3.2-3.6).
+// Input: ray radiance+distance atlas from probe trace pass
+RWTexture2D<float4> DDGIVolumeRayDataUAV;
+// Output: per-probe SG amplitude atlas
+RWTexture2D<float4> DDGIVolumeSGAmplitudeOutUAV;
+
+// Skeleton compute shader — dispatch integration done in task 3.2.
+// Weighted projection implementation follows in task 3.3.
 [numthreads(1, 1, 1)]
 void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 {
-	// Touch the basis helper so unsupported SG_LOBE_COUNT permutations fail during shader compile.
+	// Touch basis helper so unsupported SG_LOBE_COUNT permutations fail at compile time.
 	float BasisWeight = RTXGISGEvaluate(float3(0.0f, 0.0f, 1.0f), 0);
-	(void)BasisWeight;
+	if (BasisWeight < -1.0f) { /* dead code, suppress unused warning */ }
+
+	// Touch output UAV to prevent dead-code elimination of the SG amplitude resource.
+	DDGIVolumeSGAmplitudeOutUAV[uint2(0, 0)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
