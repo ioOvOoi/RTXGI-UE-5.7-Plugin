@@ -146,6 +146,8 @@ public:
 		static const EPixelFormat c_pixelFormatRadianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatIrradianceLowBitDepth = EPixelFormat::PF_A2B10G10R10;
 		static const EPixelFormat c_pixelFormatIrradianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
+		static const EPixelFormat c_pixelFormatSGAmplitudesLowBitDepth = EPixelFormat::PF_FloatRGBA;
+		static const EPixelFormat c_pixelFormatSGAmplitudesHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceHighBitDepth = EPixelFormat::PF_G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceLowBitDepth = EPixelFormat::PF_G16R16F;
 		static const EPixelFormat c_pixelFormatOffsets = EPixelFormat::PF_A16B16G16R16;
@@ -194,12 +196,21 @@ public:
 		float LightingMultiplier = 1.0f;
 		bool RuntimeStatic = false; // If true, does not update during gameplay, only during editor.
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
+		bool bSGEnabled = false;
+		int32 SGLightingMode = 0;
+		int32 SGLobeCount = 12;
+		int32 SGPrecision = 0;
+		bool bSGDiffuseEnabled = true;
+		bool bSGSpecularEnabled = true;
+		float SGHysteresis = 0.95f;
+		float SGSpecularMinRoughness = 0.5f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
 	FDDGITextureLoadContext TextureLoadContext;
 
 	TRefCountPtr<IPooledRenderTarget> ProbesIrradiance;
+	TRefCountPtr<IPooledRenderTarget> ProbesSGAmplitudes;
 	TRefCountPtr<IPooledRenderTarget> ProbesDistance;
 	TRefCountPtr<IPooledRenderTarget> ProbesOffsets;
 	TRefCountPtr<IPooledRenderTarget> ProbesStates;
@@ -255,6 +266,11 @@ static FIntPoint GetIrradianceTextureDimensions(FIntVector ProbeCounts)
 static FIntPoint GetDistanceTextureDimensions(FIntVector ProbeCounts)
 {
 	return Get2DProbeCount(ProbeCounts) * (FDDGIVolumeSceneProxy::FComponentData::c_NumTexelsDistance + 2);
+}
+
+static FIntPoint GetSGAmplitudeTextureDimensions(FIntVector ProbeCounts, int32 SGLobeCount)
+{
+	return FIntPoint(Get2DProbeCount(ProbeCounts).X * FMath::Max(1, SGLobeCount), Get2DProbeCount(ProbeCounts).Y);
 }
 
 static int32 GetProbeCount(FIntVector ProbeCounts)
@@ -440,6 +456,40 @@ public:
 	// Objects with overlapping channel flags will receive lighting from this volume
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GI Lighting")
 	FLightingChannels LightingChannels;
+
+	// --- "SG Lighting" properties
+
+	// Enables SG radiance metadata for this volume. SG rendering work remains disabled until SG passes are implemented and selected.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGEnabled = false;
+
+	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "3"))
+	int32 SGLightingMode = 0;
+
+	// Number of fixed world-space SG lobes per probe. Supported development tiers are 12 and 16.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "12", ClampMax = "16"))
+	int32 SGLobeCount = 12;
+
+	// SG amplitude precision target. 0=FP16 target, 1=FP32 validation target.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	int32 SGPrecision = 0;
+
+	// Enables SG diffuse evaluation once SG lighting passes exist.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGDiffuseEnabled = true;
+
+	// Enables SG rough specular evaluation once SG lighting passes exist.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGSpecularEnabled = true;
+
+	// Temporal hysteresis target for future SG amplitude accumulation.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	float SGHysteresis = 0.95f;
+
+	// Minimum material roughness for future SG rough specular contribution.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	float SGSpecularMinRoughness = 0.5f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")

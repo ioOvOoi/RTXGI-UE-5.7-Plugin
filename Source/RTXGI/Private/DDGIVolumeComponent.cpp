@@ -36,6 +36,8 @@
 DECLARE_GPU_STAT_NAMED(RTXGI_Update, TEXT("RTXGI Update"));
 DECLARE_GPU_STAT_NAMED(RTXGI_ApplyLighting, TEXT("RTXGI Apply Lighting"));
 DECLARE_GPU_STAT_NAMED(RTXGI_UpscaleLighting, TEXT("RTXGI Upscale Lighting"));
+DECLARE_GPU_STAT_NAMED(RTXGI_SGProjection, TEXT("RTXGI SG Projection"));
+DECLARE_GPU_STAT_NAMED(RTXGI_SGApplyLighting, TEXT("RTXGI SG Apply Lighting"));
 
 static TAutoConsoleVariable<bool> CVarUseDDGI(
 	TEXT("r.RTXGI.DDGI"),
@@ -66,6 +68,54 @@ static TAutoConsoleVariable<int> CVarStatVolume(
 	0,
 	TEXT("The index for which volume's STAT is displayed\n"),
 	ECVF_RenderThreadSafe | ECVF_Cheat);
+
+static TAutoConsoleVariable<bool> CVarSGEnable(
+	TEXT("r.RTXGI.DDGI.SG.Enable"),
+	false,
+	TEXT("Enable SG radiance metadata and future SG lighting passes. Default is disabled, preserving octahedral DDGI lighting.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarSGLightingMode(
+	TEXT("r.RTXGI.DDGI.SG.LightingMode"),
+	0,
+	TEXT("SG DDGI lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarSGLobeCount(
+	TEXT("r.RTXGI.DDGI.SG.LobeCount"),
+	12,
+	TEXT("Number of fixed SG lobes per DDGI probe. Supported values: 12 or 16.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarSGPrecision(
+	TEXT("r.RTXGI.DDGI.SG.Precision"),
+	0,
+	TEXT("SG amplitude precision. 0=FP16 target, 1=FP32 validation target.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<bool> CVarSGDiffuse(
+	TEXT("r.RTXGI.DDGI.SG.Diffuse"),
+	true,
+	TEXT("Enable SG diffuse evaluation when an SG lighting mode is selected.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<bool> CVarSGSpecular(
+	TEXT("r.RTXGI.DDGI.SG.Specular"),
+	true,
+	TEXT("Enable SG rough specular evaluation when an SG lighting mode is selected.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSGHysteresis(
+	TEXT("r.RTXGI.DDGI.SG.Hysteresis"),
+	0.95f,
+	TEXT("Temporal hysteresis for future SG amplitude accumulation. 0 uses only new projection, 1 keeps history.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSGSpecularMinRoughness(
+	TEXT("r.RTXGI.DDGI.SG.Specular.MinRoughness"),
+	0.5f,
+	TEXT("Minimum roughness for future SG rough specular contribution. Lower roughness remains on the existing reflection stack.\n"),
+	ECVF_RenderThreadSafe);
 
 //static FCriticalSection GDDGIReadbackCS;
 //static TMap<FDDGITexturePixels*, TUniquePtr<FRHIGPUTextureReadback>> GDDGIReadbacks;
@@ -294,6 +344,27 @@ void FDDGIVolumeSceneProxy::ReallocateSurfaces_RenderThread(FRHICommandListImmed
 #endif
 	}
 
+	// SG amplitudes - allocated only when SG metadata is enabled. Default DDGI keeps this released.
+	if (ComponentData.bSGEnabled)
+	{
+		SCOPED_GPU_STAT(RHICmdList, RTXGI_SGProjection);
+		SCOPED_DRAW_EVENT(RHICmdList, RTXGI_SGAmplitudeAllocation);
+
+		FIntPoint ProxyTexDims = GetSGAmplitudeTextureDimensions(ComponentData.ProbeCounts, ComponentData.SGLobeCount);
+		EPixelFormat Format = (ComponentData.SGPrecision == 1) ? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth : FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
+
+		FPooledRenderTargetDesc Desc(FPooledRenderTargetDesc::Create2DDesc(ProxyTexDims, Format, FClearValueBinding::Transparent, TexCreate_None, TexCreate_ShaderResource | TexCreate_UAV, false));
+#if ENGINE_MAJOR_VERSION < 5
+		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, ProbesSGAmplitudes, TEXT("DDGISGAmplitudes"), ERenderTargetTransience::NonTransient);
+#else
+		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, ProbesSGAmplitudes, TEXT("DDGISGAmplitudes"));
+#endif
+	}
+	else
+	{
+		ProbesSGAmplitudes.SafeRelease();
+	}
+
 	// Distance
 	{
 		FIntPoint ProxyTexDims = GetDistanceTextureDimensions(ComponentData.ProbeCounts);
@@ -362,6 +433,10 @@ void FDDGIVolumeSceneProxy::ResetTextures_RenderThread(FRDGBuilder& GraphBuilder
 {
 	float ClearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesIrradiance)), ClearColor);
+	if (ProbesSGAmplitudes)
+	{
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesSGAmplitudes)), ClearColor);
+	}
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesDistance)), ClearColor);
 
 	if (ProbesOffsets)
@@ -1348,6 +1423,15 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.LightingMultiplier = LightMultiplier;
 		ComponentData.RuntimeStatic = RuntimeStatic;
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
+		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
+		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
+		ComponentData.SGLightingMode = FMath::Clamp(bGlobalSGEnabled ? CVarSGLightingMode.GetValueOnGameThread() : SGLightingMode, 0, 3);
+		ComponentData.SGLobeCount = ((bGlobalSGEnabled ? CVarSGLobeCount.GetValueOnGameThread() : SGLobeCount) >= 16) ? 16 : 12;
+		ComponentData.SGPrecision = FMath::Clamp(bGlobalSGEnabled ? CVarSGPrecision.GetValueOnGameThread() : SGPrecision, 0, 1);
+		ComponentData.bSGDiffuseEnabled = bSGDiffuseEnabled && CVarSGDiffuse.GetValueOnGameThread();
+		ComponentData.bSGSpecularEnabled = bSGSpecularEnabled && CVarSGSpecular.GetValueOnGameThread();
+		ComponentData.SGHysteresis = FMath::Clamp(bGlobalSGEnabled ? CVarSGHysteresis.GetValueOnGameThread() : SGHysteresis, 0.0f, 1.0f);
+		ComponentData.SGSpecularMinRoughness = FMath::Clamp(bGlobalSGEnabled ? CVarSGSpecularMinRoughness.GetValueOnGameThread() : SGSpecularMinRoughness, 0.0f, 1.0f);
 
 		if (ScrollProbesInfinitely)
 		{
@@ -1445,7 +1529,10 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 				bool needReallocate =
 					DDGIProxy->ComponentData.ProbeCounts != ComponentData.ProbeCounts ||
 					DDGIProxy->ComponentData.RaysPerProbe != ComponentData.RaysPerProbe ||
-					DDGIProxy->ComponentData.EnableProbeRelocation != ComponentData.EnableProbeRelocation;
+					DDGIProxy->ComponentData.EnableProbeRelocation != ComponentData.EnableProbeRelocation ||
+					DDGIProxy->ComponentData.bSGEnabled != ComponentData.bSGEnabled ||
+					DDGIProxy->ComponentData.SGLobeCount != ComponentData.SGLobeCount ||
+					DDGIProxy->ComponentData.SGPrecision != ComponentData.SGPrecision;
 		
 				// Now assign the new data
 				DDGIProxy->ComponentData = ComponentData;

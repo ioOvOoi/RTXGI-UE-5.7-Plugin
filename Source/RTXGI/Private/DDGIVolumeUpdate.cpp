@@ -438,6 +438,27 @@ class FDDGIDistanceBlend : public FGlobalShader
 
 IMPLEMENT_GLOBAL_SHADER(FDDGIDistanceBlend, "/Plugin/RTXGI/Private/SDK/ddgi/ProbeBlendingCS.usf", "DDGIProbeBlendingCS", SF_Compute);
 
+class FDDGISGProject : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FDDGISGProject)
+	SHADER_USE_PARAMETER_STRUCT(FDDGISGProject, FGlobalShader)
+
+	class FSGLobeCount : SHADER_PERMUTATION_SPARSE_INT("SG_LOBE_COUNT", 12, 16);
+	using FPermutationDomain = TShaderPermutationDomain<FSGLobeCount>;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(int, ProbeIndexStart)
+		SHADER_PARAMETER(int, ProbeIndexCount)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FDDGISGProject, "/Plugin/RTXGI/Private/SDK/ddgi/ProbeSGProjectCS.usf", "DDGIProbeSGProjectCS", SF_Compute);
+
 class FDDGIBorderRowUpdate : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FDDGIBorderRowUpdate)

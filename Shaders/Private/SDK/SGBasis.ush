@@ -1,0 +1,66 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#ifndef RTXGI_SG_BASIS_USH
+#define RTXGI_SG_BASIS_USH
+
+#ifndef SG_LOBE_COUNT
+#define SG_LOBE_COUNT 12
+#endif
+
+static const float RTXGI_SG_UNIFORM_SHARPNESS = 3.0f;
+
+#if SG_LOBE_COUNT == 12
+static const float3 RTXGI_SG_AXES[12] =
+{
+	float3( 0.000000f,  0.525731f,  0.850651f),
+	float3( 0.000000f, -0.525731f,  0.850651f),
+	float3( 0.000000f,  0.525731f, -0.850651f),
+	float3( 0.000000f, -0.525731f, -0.850651f),
+	float3( 0.525731f,  0.850651f,  0.000000f),
+	float3(-0.525731f,  0.850651f,  0.000000f),
+	float3( 0.525731f, -0.850651f,  0.000000f),
+	float3(-0.525731f, -0.850651f,  0.000000f),
+	float3( 0.850651f,  0.000000f,  0.525731f),
+	float3( 0.850651f,  0.000000f, -0.525731f),
+	float3(-0.850651f,  0.000000f,  0.525731f),
+	float3(-0.850651f,  0.000000f, -0.525731f)
+};
+#elif SG_LOBE_COUNT == 16
+static const float3 RTXGI_SG_AXES[16] =
+{
+	float3( 0.000000f,  1.000000f,  0.000000f),
+	float3( 0.000000f, -1.000000f,  0.000000f),
+	float3( 1.000000f,  0.000000f,  0.000000f),
+	float3(-1.000000f,  0.000000f,  0.000000f),
+	float3( 0.000000f,  0.000000f,  1.000000f),
+	float3( 0.000000f,  0.000000f, -1.000000f),
+	float3( 0.577350f,  0.577350f,  0.577350f),
+	float3( 0.577350f,  0.577350f, -0.577350f),
+	float3( 0.577350f, -0.577350f,  0.577350f),
+	float3( 0.577350f, -0.577350f, -0.577350f),
+	float3(-0.577350f,  0.577350f,  0.577350f),
+	float3(-0.577350f,  0.577350f, -0.577350f),
+	float3(-0.577350f, -0.577350f,  0.577350f),
+	float3(-0.577350f, -0.577350f, -0.577350f),
+	float3( 0.707107f,  0.707107f,  0.000000f),
+	float3(-0.707107f, -0.707107f,  0.000000f)
+};
+#else
+#error "Unsupported SG_LOBE_COUNT. Expected 12 or 16."
+#endif
+
+float RTXGISGEvaluate(float3 Direction, uint LobeIndex)
+{
+	float CosAngle = dot(normalize(Direction), RTXGI_SG_AXES[LobeIndex]);
+	return exp(RTXGI_SG_UNIFORM_SHARPNESS * (CosAngle - 1.0f));
+}
+
+#endif // RTXGI_SG_BASIS_USH
