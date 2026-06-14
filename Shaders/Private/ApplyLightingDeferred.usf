@@ -34,6 +34,7 @@ float4              ScaledViewSizeAndInvSize;
 int2                ScaledViewOffset;
 uint                ShouldUsePreExposure;
 uint                NumVolumes;
+float               SGSpecularMinRoughness;
 
 // generate an array of structures for each probe volume
 #define VOLUME_ENTRY(x) \
@@ -104,26 +105,143 @@ float4 ApplyVolumeLightingContribution(
     {
         if (SGLightingMode > 0 && SGLobeCount > 0)
         {
-            // --- SG radiance lighting path (temporary probe 0 only) ---
-            float3 Amplitudes[12];
-            for (int kl = 0; kl < 12; ++kl) Amplitudes[kl] = float3(0, 0, 0);
-            int2 sgBase = int2(0, 0);
-            for (int ki = 0; ki < 12; ++ki)
+            // Coefficient-first SG blending with 8-probe DDGI visibility
+            float3 biasedWorldPosition = WorldPosition + DDGIGetSurfaceBias(Normal, CameraDirection, Volume);
+            int3 baseProbeCoords = DDGIGetBaseProbeGridCoords(biasedWorldPosition, Volume.origin, Volume.rotation, Volume.probeGridCounts, Volume.probeGridSpacing);
+            float3 baseProbeWorldPosition = DDGIGetProbeWorldPosition(baseProbeCoords, Volume.origin, Volume.rotation, Volume.probeGridCounts, Volume.probeGridSpacing);
+            float3 distanceVolumeSpace = RTXGIQuaternionRotate(biasedWorldPosition - baseProbeWorldPosition, RTXGIQuaternionConjugate(Volume.rotation));
+            float3 alpha = clamp(distanceVolumeSpace / Volume.probeGridSpacing, float3(0, 0, 0), float3(1, 1, 1));
+            int probeCount2D_SG = Volume.probeGridCounts.y * Volume.probeGridCounts.z;
+
+            // Accumulate blended SG amplitudes across 8 neighboring probes
+            float3 blendedAmps[12];
+            float  totalWeight = 0;
+            for (int kk = 0; kk < 12; ++kk) blendedAmps[kk] = float3(0, 0, 0);
+
+            for(int pi = 0; pi < 8; ++pi)
             {
-                if (ki < SGLobeCount) Amplitudes[ki] = ProbeSGTexture[sgBase + int2(ki, 0)].rgb;
+                int3 off = int3(pi, pi >> 1, pi >> 2) & int3(1, 1, 1);
+                int3 adjCoords = clamp(baseProbeCoords + off, int3(0, 0, 0), Volume.probeGridCounts - int3(1, 1, 1));
+                int adjIndex = DDGIGetProbeIndex(adjCoords, Volume.probeGridCounts);
+
+            #if RTXGI_DDGI_PROBE_CLASSIFICATION
+                #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                    int stateIndex = DDGIGetProbeIndexOffset(adjIndex, Volume.probeGridCounts, Volume.probeScrollOffsets);
+                #else
+                    int stateIndex = adjIndex;
+                #endif
+                int2 probeStateTexel = DDGIGetProbeTexelPosition(stateIndex, Volume.probeGridCounts);
+                if(ProbeStates.Load(int3(probeStateTexel, 0)) == PROBE_STATE_INACTIVE) continue;
+            #endif
+
+            #if RTXGI_DDGI_PROBE_RELOCATION
+                #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                    float3 adjWorldPos = DDGIGetProbeWorldPositionWithOffset(adjCoords, Volume.origin, Volume.rotation, Volume.probeGridCounts, Volume.probeGridSpacing, Volume.probeScrollOffsets, ProbeOffsets);
+                #else
+                    float3 adjWorldPos = DDGIGetProbeWorldPositionWithOffset(adjCoords, Volume.origin, Volume.rotation, Volume.probeGridCounts, Volume.probeGridSpacing, ProbeOffsets);
+                #endif
+            #else
+                float3 adjWorldPos = DDGIGetProbeWorldPosition(adjCoords, Volume.origin, Volume.rotation, Volume.probeGridCounts, Volume.probeGridSpacing);
+            #endif
+                float3 worldPosToAdj = normalize(adjWorldPos - WorldPosition);
+                float3 biasedPosToAdj = normalize(adjWorldPos - biasedWorldPosition);
+                float  biasedDist = length(adjWorldPos - biasedWorldPosition);
+
+                float3 tri = max(0.001f, lerp(1 - alpha, alpha, off));
+                float  weight = tri.x * tri.y * tri.z;
+
+                // Wrap-shading weight
+                float wrapShading = (dot(worldPosToAdj, Normal) + 1) * 0.5f;
+                weight *= (wrapShading * wrapShading) + 0.2f;
+
+                // Chebyshev visibility from distance moments
+                float2 octCoords = DDGIGetOctahedralCoordinates(-biasedPosToAdj);
+            #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                float2 distUV = DDGIGetProbeUV(adjIndex, octCoords, Volume.probeGridCounts, Volume.probeNumDistanceTexels, Volume.probeScrollOffsets);
+            #else
+                float2 distUV = DDGIGetProbeUV(adjIndex, octCoords, Volume.probeGridCounts, Volume.probeNumDistanceTexels);
+            #endif
+                float2 filteredDist = ProbeDistance.SampleLevel(LinearClampSampler, distUV, 0).rg;
+                float meanDist = filteredDist.x;
+                float variance = abs(filteredDist.x * filteredDist.x - filteredDist.y);
+                float chebWeight = 1;
+                if(biasedDist > meanDist)
+                {
+                    float v = biasedDist - meanDist;
+                    chebWeight = variance / (variance + v * v);
+                    chebWeight = max(chebWeight * chebWeight * chebWeight, 0);
+                }
+                weight *= max(0.05f, chebWeight);
+                if(weight < 0.2f) weight *= weight * weight * 25; // crush tiny weights
+                weight = max(weight, 0.000001f);
+
+                // Read SG amplitudes for this probe and accumulate
+            #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                int sgProbeIndex = DDGIGetProbeIndexOffset(adjIndex, Volume.probeGridCounts, Volume.probeScrollOffsets);
+            #else
+                int sgProbeIndex = adjIndex;
+            #endif
+                int sgBase = (sgProbeIndex % probeCount2D_SG) * SGLobeCount;
+                int sgRow = sgProbeIndex / probeCount2D_SG;
+                for(int k = 0; k < SGLobeCount && k < 12; ++k)
+                    blendedAmps[k] += ProbeSGTexture[int2(sgBase + k, sgRow)].rgb * weight;
+                totalWeight += weight;
             }
 
-            if (SGLightingMode == 1)
+            // Normalize blended amplitudes
+            if(totalWeight > 0)
+                for(int k = 0; k < 12; ++k) blendedAmps[k] /= totalWeight;
+
+            float roughness = SGSpecularMinRoughness > 0 ? SGSpecularMinRoughness : 0.5f;
+            float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps);
+            float3 SGDiffuse = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
+
+            if(SGLightingMode == 1)
             {
-                float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, Amplitudes);
-                LightWeight.rgb = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
+                // SG diffuse only
+                LightWeight.rgb = SGDiffuse;
+            }
+            else if(SGLightingMode == 3)
+            {
+                // SG specular-only debug view
+                LightWeight.rgb = RTXGISGSpecular(Normal, CameraDirection, roughness, blendedAmps) / IrradianceScalar;
+            }
+            else if(SGLightingMode == 4)
+            {
+                // SG vs octa diffuse absolute-difference debug view
+                DDGIVolumeResources Resources;
+                Resources.probeIrradianceSRV = ProbeIrradiance;
+                Resources.probeDistanceSRV = ProbeDistance;
+                Resources.bilinearSampler = LinearClampSampler;
+            #if RTXGI_DDGI_PROBE_RELOCATION
+                Resources.probeOffsetsSRV = ProbeOffsets;
+            #endif
+            #if RTXGI_DDGI_PROBE_CLASSIFICATION
+                Resources.probeStatesSRV = ProbeStates;
+            #endif
+                float3 SurfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, Volume);
+                float3 OctaIrradiance = DDGIGetVolumeIrradiance(WorldPosition, SurfaceBias, Normal, Volume, Resources);
+                float3 OctaDiffuse = OctaIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
+                LightWeight.rgb = abs(SGDiffuse - OctaDiffuse) * 4.0f;
+            }
+            else if(SGLightingMode == 5)
+            {
+                // SG directional radiance debug: evaluate reconstructed radiance along surface normal
+                float3 Radiance = float3(0, 0, 0);
+                for(int k = 0; k < 12; ++k)
+                    Radiance += blendedAmps[k] * RTXGISGEvaluate(Normal, k);
+                LightWeight.rgb = Radiance / IrradianceScalar;
             }
             else
             {
-                float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, Amplitudes);
-                float3 SGSpec = RTXGISGSpecular(Normal, CameraDirection, 0.5f, Amplitudes);
-                LightWeight.rgb = (SGIrradiance * (Albedo / RTXGI_PI) + SGSpec) / IrradianceScalar;
+                // Mode 2: SG diffuse + rough specular
+                float3 SGSpec = RTXGISGSpecular(Normal, CameraDirection, roughness, blendedAmps);
+                LightWeight.rgb = SGDiffuse + (SGSpec * 0.15f / IrradianceScalar);
             }
+
+            // NaN guard
+            if(any(isnan(LightWeight.rgb)) || any(isinf(LightWeight.rgb)))
+                LightWeight.rgb = float3(0, 0, 0);
         }
         else
         {

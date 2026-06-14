@@ -36,8 +36,13 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	int probeCount2D = probeGridCounts.y * probeGridCounts.z;
 
 	// Compute output texture coordinates for this probe
-	int outY = probeIndex / probeCount2D;
-	int outBaseX = (probeIndex % probeCount2D) * SG_LOBE_COUNT;
+#if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+	int storageProbeIndex = DDGIGetProbeIndexOffset(probeIndex, probeGridCounts, DDGIVolume.probeScrollOffsets);
+#else
+	int storageProbeIndex = probeIndex;
+#endif
+	int outY = storageProbeIndex / probeCount2D;
+	int outBaseX = (storageProbeIndex % probeCount2D) * SG_LOBE_COUNT;
 
 	// Accumulator arrays on stack (HLSL compiles to registers)
 	float3 amplitudes[16]; // max 16 lobes
