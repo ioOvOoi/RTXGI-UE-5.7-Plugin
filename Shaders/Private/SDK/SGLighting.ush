@@ -1,0 +1,92 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#ifndef RTXGI_SG_LIGHTING_USH
+#define RTXGI_SG_LIGHTING_USH
+
+#include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
+
+// SG lighting helpers for evaluating SG radiance probe data.
+// Operates on SG amplitude arrays (per-probe per-lobe RGB amplitudes).
+
+// Approximate inner product of two SG lobes with identical axes:
+//   ∫ G_k(v) * G_j(v) dv ≈ 2π / (λ_k + λ_j) * exp((λ_k*λ_j)/(λ_k+λ_j) * (dot(μ_k,μ_j) - 1))
+// For our fixed-basis case (same axis set, same sharpness λ per lobe):
+//   InnerProduct_self = π * (1 - exp(-2λ)) / λ  (when axes are identical)
+float RTXGISGSelfInnerProduct()
+{
+	// Uniform sharpness case: analytic integral of G * G over sphere
+	return RTXGI_PI * (1.0f - exp(-2.0f * RTXGI_SG_UNIFORM_SHARPNESS)) / RTXGI_SG_UNIFORM_SHARPNESS;
+}
+
+// Evaluate SG radiance at a given direction
+float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[SG_LOBE_COUNT])
+{
+	float3 result = float3(0.0f, 0.0f, 0.0f);
+	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	{
+		float w = RTXGISGEvaluate(Direction, k);
+		result += Amplitudes[k] * w;
+	}
+	return result;
+}
+
+// Compute diffuse irradiance from SG radiance.
+// Approximates ∫ L(v) * max(0, dot(n,v)) dv using inner product
+// of each SG lobe with a fixed-width cosine SG approximation.
+float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[SG_LOBE_COUNT])
+{
+	// Cosine lobe approximated as an SG: axis = n, sharpness ≈ 2.0
+	// InnerProduct( G(μ,λ), G_cosine(n,λ_cos) )
+	static const float CosineSharpness = 2.0f;
+	float3 irradiance = float3(0.0f, 0.0f, 0.0f);
+
+	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	{
+		float cosTheta = dot(normalize(Normal), RTXGI_SG_AXES[k]);
+		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + CosineSharpness;
+		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * CosineSharpness) / sumLambda;
+
+		// Approximate inner product of two SG lobes
+		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
+
+		irradiance += Amplitudes[k] * innerProduct;
+	}
+	return irradiance;
+}
+
+// Evaluate rough specular from SG radiance using a GGX-BRDF-as-SG approximation.
+// Roughness: perceptual roughness (0..1).
+// Normal, View: world-space unit vectors.
+float3 RTXGISGSpecular(float3 Normal, float3 View, float Roughness, float3 Amplitudes[SG_LOBE_COUNT])
+{
+	float3 H = normalize(View + Normal);
+
+	// Match the GGX lobe to an SG.
+	// Approximate GGX(θ, α) as exp(-tan²(θ)/α²) → SG with axis = H, sharpness = 2/α²
+	float alpha = Roughness * Roughness;
+	float specSharpness = 2.0f / max(alpha, 0.0001f);
+
+	float3 specular = float3(0.0f, 0.0f, 0.0f);
+
+	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	{
+		float cosTheta = dot(H, RTXGI_SG_AXES[k]);
+		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + specSharpness;
+		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * specSharpness) / sumLambda;
+
+		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
+
+		specular += Amplitudes[k] * innerProduct;
+	}
+	return specular;
+}
+
+#endif // RTXGI_SG_LIGHTING_USH

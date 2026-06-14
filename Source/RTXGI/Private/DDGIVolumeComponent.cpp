@@ -140,6 +140,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
 	SHADER_PARAMETER(float, BlendDistanceBlack)
 	SHADER_PARAMETER(float, ApplyLighting)
 	SHADER_PARAMETER(float, IrradianceScalar)
+	// SG metadata per volume (no SRV cost)
+	SHADER_PARAMETER(int, SGLobeCount)
+	SHADER_PARAMETER(int, SGLightingMode)
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
@@ -155,6 +158,8 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(FIntPoint, ScaledViewOffset)
 	SHADER_PARAMETER(int32, ShouldUsePreExposure)
 	SHADER_PARAMETER(int32, NumVolumes)
+	// Global SG amplitude texture (single slot, avoids per-volume SRV overflow)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeSGTexture)
 	// Volumes are sorted from densest probes to least dense probes
 	SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
@@ -798,6 +803,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
+			PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 			DECLARE_DWORD_COUNTER_STAT(TEXT("Total Number of Volumes: "), TOTAL_VOLUME, STATGROUP_RTXGI);
@@ -853,6 +859,16 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 
 				// Apply the lighting multiplier to artificially lighten or darken the indirect light from the volume
 				PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
+
+				// SG lighting parameters
+				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Max(1, volumeProxy->ComponentData.SGLobeCount);
+				PassParameters->DDGIVolume[volumeIndex].SGLightingMode = volumeProxy->ComponentData.SGLightingMode;
+
+				// Bind global SG amplitude texture (last SG volume wins, fine for single-volume case)
+				if (volumeProxy->ProbesSGAmplitudes)
+				{
+					PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesSGAmplitudes);
+				}
 				
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 				uint32 raysPerProbe = GetNumRaysPerProbe(volumeProxy->ComponentData.RaysPerProbe);

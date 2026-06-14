@@ -91,6 +91,12 @@ static TAutoConsoleVariable<bool> CVarDDGIStatic(
 	TEXT("If true all DDGI volumes are running static"),
 	ECVF_RenderThreadSafe);
 
+static TAutoConsoleVariable<int32> CVarSGDump(
+	TEXT("r.RTXGI.DDGI.SG.Dump"),
+	0,
+	TEXT("Dump first probe SG amplitudes to output log every N frames. 0=off.\n"),
+	ECVF_RenderThreadSafe);
+
 #if !RHI_RAYTRACING
 #error "RTXGI requires RHI_RAYTRACING to be enabled"
 #endif
@@ -450,6 +456,15 @@ class FDDGISGProject : public FGlobalShader
 	class FFormatIrradiance : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_FORMAT_IRRADIANCE");
 
 	using FPermutationDomain = TShaderPermutationDomain<FSGLobeCount, FFormatRadiance, FFormatIrradiance>;
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_PROBE_CLASSIFICATION"), FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_PROBE_CLASSIFICATION ? 1 : 0);
+		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_BLEND_RADIANCE"), 1);
+		// needed for a typed UAV load
+		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
+	}
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -1417,12 +1432,12 @@ void DebugShaderPlatformsDetailed()
 
 	void DDGIUpdateVolume_RenderThread_SGProject(const FViewInfo& View, FRDGBuilder& GraphBuilder, FDDGIVolumeSceneProxy* VolProxy, const FMatrix44f& ProbeRayRotationTransform, FRDGTextureUAVRef ProbesRadianceUAV, bool highBitCount)
 	{
-		if (!VolProxy->ComponentData.bSGEnabled || !VolProxy->ProbesSGAmplitudes)
-		{
-			// Also check CVar directly — allows console toggle without volume re-send
-			static IConsoleVariable* CVarSGEnableRenderThread = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.Enable"));
-			if (!CVarSGEnableRenderThread || !CVarSGEnableRenderThread->GetBool() || !VolProxy->ProbesSGAmplitudes) return;
-		}
+		// SG amplitude texture must be allocated (set bSGEnabled=true on volume first)
+		if (!VolProxy->ProbesSGAmplitudes) return;
+
+		// CVar is absolute master toggle; property controls allocation only
+		static IConsoleVariable* CVarSGEnableRenderThread = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.Enable"));
+		if (!CVarSGEnableRenderThread || !CVarSGEnableRenderThread->GetBool()) return;
 
 		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 		FDDGISGProject::FPermutationDomain PermutationVector;
@@ -1456,15 +1471,48 @@ void DebugShaderPlatformsDetailed()
 		PassParameters->DDGIVolumeRayDataUAV = ProbesRadianceUAV;
 		PassParameters->DDGIVolumeSGAmplitudeOutUAV = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSGAmplitudes));
 
-		FIntPoint ProbeCount2D = Get2DProbeCount(VolProxy->ComponentData.ProbeCounts);
+		int probeCount = GetProbeCount(VolProxy->ComponentData.ProbeCounts);
 		RDG_GPU_STAT_SCOPE(GraphBuilder, RTXGI_SGProjection);
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,
 			RDG_EVENT_NAME("DDGI SG Projection"),
 			ComputeShader,
 			PassParameters,
-			FIntVector(ProbeCount2D.X, ProbeCount2D.Y, 1)
+			FIntVector(FMath::DivideAndRoundUp(probeCount, 64), 1, 1)
 		);
+
+		// Debug dump: read back first probe's first lobe amplitude
+		{
+			static TUniquePtr<FRHIGPUTextureReadback> SGDumpReadback;
+			static int32 SGDumpFrameCounter = 0;
+			int32 DumpInterval = CVarSGDump.GetValueOnRenderThread();
+
+			// Check previous readback
+			if (SGDumpReadback && SGDumpReadback->IsReady())
+			{
+				int32 RowPitch;
+				const FFloat16Color* Pixels = static_cast<const FFloat16Color*>(SGDumpReadback->Lock(RowPitch));
+				if (Pixels)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[DDGI SG Dump] Probe0 Lobe0: R=%.4f G=%.4f B=%.4f"),
+						Pixels[0].R.GetFloat(), Pixels[0].G.GetFloat(), Pixels[0].B.GetFloat());
+				}
+				SGDumpReadback->Unlock();
+				SGDumpReadback.Reset();
+			}
+
+			// Submit new readback
+			if (DumpInterval > 0 && ++SGDumpFrameCounter >= DumpInterval)
+			{
+				SGDumpFrameCounter = 0;
+				if (!SGDumpReadback)
+				{
+					SGDumpReadback = MakeUnique<FRHIGPUTextureReadback>(TEXT("DDGISGDump"));
+					FRDGTextureRef SGTex = GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSGAmplitudes);
+					AddEnqueueCopyPass(GraphBuilder, SGDumpReadback.Get(), SGTex, FResolveRect(0, 0, 1, 1));
+				}
+			}
+		}
 	}
 
 	void DDGIUpdateVolume_RenderThread_IrradianceBlend(const FViewInfo& View, FRDGBuilder& GraphBuilder, FDDGIVolumeSceneProxy* VolProxy, const FMatrix44f& ProbeRayRotationTransform, FRDGTextureUAVRef ProbesRadianceUAV, bool highBitCount, bool bPartialUpdate = false)
