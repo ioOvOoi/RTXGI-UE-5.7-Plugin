@@ -1,0 +1,254 @@
+---
+title: "SG Series Part 5: Approximating Radiance and Irradiance With SG’s"
+source: https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/
+author:
+  - "[[MJP]]"
+published: 2016-10-10
+created: 2026-06-14
+description: "You can find an ad-free static site version of this post here: https://therealmjp.github.io/posts/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/ This is part 5 of a series on Spherical Gaussians and their applications for pre-computed lighting. You can find the other articles here: Part 1 - A Brief (and Incomplete) History of Baked Lighting Representations Part 2 - Spherical Gaussians 101 Part 3 - Diffuse…"
+tags:
+  - Clippings review
+updated: 2026-06-14T17:17
+---
+**You can find an ad-free static site version of this post here: [https://therealmjp.github.io/posts/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/](https://therealmjp.github.io/posts/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/)  
+您可以在这里找到这篇文章的无广告静态网站版本： [https://therealmjp.github.io/posts/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/](https://therealmjp.github.io/posts/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/)**
+
+*This is part 5 of a series on Spherical Gaussians and their applications for pre-computed lighting. You can find the other articles here:  
+这是关于球面高斯函数及其在预计算光照中应用系列文章的第五部分。您可以在这里找到其他文章：*
+
+Part 1 – [A Brief (and Incomplete) History of Baked Lighting Representations](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-1-a-brief-and-incomplete-history-of-baked-lighting-representations/)  
+第一部分—— [烘焙照明表示的简史（不完整）](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-1-a-brief-and-incomplete-history-of-baked-lighting-representations/)  
+Part 2 – [Spherical Gaussians 101](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-2-spherical-gaussians-101/)  
+第二部分—— [球面高斯分布入门](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-2-spherical-gaussians-101/)  
+Part 3 – [Diffuse Lighting From an SG Light Source](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-3-diffuse-lighting-from-an-sg-light-source/)  
+第三部分 – [来自 SG 光源的漫射光](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-3-diffuse-lighting-from-an-sg-light-source/)  
+Part 4 – [Specular Lighting From an SG Light Source](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-4-specular-lighting-from-an-sg-light-source/)  
+第四部分 – [来自 SG 光源的镜面反射照明](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-4-specular-lighting-from-an-sg-light-source/)  
+Part 5 – [Approximating Radiance and Irradiance With SG’s](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/)  
+第五部分—— [利用 SG 近似计算辐射率和辐照度](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-5-approximating-radiance-and-irradiance-with-sgs/)  
+Part 6 – [Step Into The Baking Lab](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-6-step-into-the-baking-lab/)  
+第六部分—— [走进烘焙实验室](https://mynameismjp.wordpress.com/2016/10/09/sg-series-part-6-step-into-the-baking-lab/)
+
+In the two previous articles I showed workable approaches for approximating the diffuse and specular result from a Spherical Gaussian light source. On its own these techniques might seem a bit silly, since it’s not immediately obvious why the heck it would be useful to light a scene with an SG light source. But then you might remember that these articles started off by discussing methods for storing pre-computed radiance or irradiance in lightmaps or probe grids, which is a subject we’ll finally return to.  
+在前两篇文章中，我展示了一些可行的方法，用于近似计算球面高斯光源的漫反射和镜面反射结果。这些技术本身可能看起来有点傻，因为乍一看，用球面高斯光源照亮场景究竟有什么用处并不明显。但你可能还记得，这两篇文章最初讨论的是将预先计算的辐射度或辐照度存储在光照贴图或探测网格中的方法，而这正是我们最终会再次探讨的主题。
+
+### Finding The Perfect Fit找到最合适的
+
+A common process in mathematics (particularly statistics) is to take a set of data points and attempt to figure out some sort of analytical curve that can represent the data. This process is known as [curve fitting](https://en.wikipedia.org/wiki/Curve_fitting) \[1\], since the goal is to find a curve that is a good fit for the data points. There’s various reasons to do this (such as [regression analysis](https://en.wikipedia.org/wiki/Regression_analysis) \[2\]), but I find it can helpful to think of it as a form of lossy compression: a few hundred data points might require kilobytes of data, but if you can approximate that data with a curve the coefficients might only need a few bytes of storage. Here’s a simple example from Wikipedia:  
+在数学（尤其是统计学）中，一个常见的做法是获取一组数据点，并尝试找到一条能够代表这些数据的解析曲线。这个过程被称为 [曲线拟合](https://en.wikipedia.org/wiki/Curve_fitting) \[1\]，因为其目标是找到一条能够很好地拟合数据点的曲线。进行曲线拟合的原因有很多（例如 [回归分析](https://en.wikipedia.org/wiki/Regression_analysis) \[2\]），但我认为将其视为一种有损压缩形式会很有帮助：几百个数据点可能需要几千字节的数据，但如果可以用曲线来近似这些数据，那么曲线的系数可能只需要几个字节的存储空间。以下是来自维基百科的一个简单示例：*Fitting various polynomials to data generated by a sine wave. Red is first degree, green is second degree, orange is third degree, blue is forth degree.  
+将各种多项式拟合到正弦波生成的数据上。红色为一次多项式，绿色为二次多项式，橙色为三次多项式，蓝色为四次多项式。  
+By Krishnavedala (Own work) \[CC0\], via Wikimedia Commons  
+图片来自 Krishnavedala（本人作品）\[CC0\]，经由 Wikimedia Commons 提供*
+
+In the image there’s a bunch of black dots, which represent a set of data points that we want to fit. In this case the data points come from a sine wave, but in practice the data could take any form. The various colored curves represents attempts at fitting the data using polynomials of varying degrees:  
+图中有很多黑点，代表我们需要拟合的一组数据点。在这个例子中，数据点来自正弦波，但实际上数据可以呈现任何形式。不同颜色的曲线代表了使用不同阶数的多项式拟合数据的尝试：
+
+$$
+y = c_0 + c_1 \cdot x
+$$
+  
+
+$$
+y = c_0 + c_1 \cdot x + c_2 \cdot x^2
+$$
+  
+
+$$
+y = c_0 + c_1 \cdot x + c_2 \cdot x^2  + c_3 \cdot x^3
+$$
+
+$$
+y = c_0 + c_1 \cdot x + c_2 \cdot x^2  + c_3 \cdot x^3 + c_4 \cdot x^4
+$$
+
+By looking at graphs and the forms of the polynomials it should be obvious that higher degrees allow for more complex curves, but require more coefficients. More coefficients means more data to store, and may also mean that the fitting process is more difficult and/or more expensive. One of the most common techniques used for fitting is [least squares](https://en.wikipedia.org/wiki/Least_squares) \[3\], which works by minimizing the sum of all differences between the fit curve and the original data.  
+通过观察图表和多项式的形式，可以明显看出，更高的次数可以拟合更复杂的曲线，但需要更多的系数。更多的系数意味着需要存储更多的数据，也可能意味着拟合过程更加困难和/或成本更高。最常用的拟合技术之一是 [最小二乘法](https://en.wikipedia.org/wiki/Least_squares) \[3\]，其原理是最小化拟合曲线与原始数据之间所有差异的总和。
+
+The other observation we can make it that the resulting fit is essentially a linear combination of basis functions, where the basis functions are $x$ , $x^2$ , $x^3$ , and so on. There are many other basis functions we could use here instead of polynomials, such as our old friend the Gaussian! Just like polynomials, a sum of Gaussians can represent more complex functions with a handful of coefficients. As an example, let’s take a set of data points and use least squares to fit varying numbers of Gaussians:  
+我们还可以观察到，最终的拟合结果本质上是基函数的线性组合，其中基函数为 $x$ 、 $x^2$ 、 $x^3$ 等等。除了多项式之外，我们还可以使用许多其他基函数，例如我们熟悉的 Gaussian 函数！就像多项式一样，Gaussian 函数的和也可以用少量系数表示更复杂的函数。例如，让我们取一组数据点，并使用最小二乘法拟合不同数量的 Gaussian 函数：
+
+[![Gaussian_Fit](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/gaussian_fit.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/gaussian_fit.png)
+
+*Fitting Gaussians to a data set using least squares. The left graph shows a fit with a single Gaussian, the middle graph shows a fit with two Gaussians, and the right graph shows a fit with three Gaussians.  
+使用最小二乘法将高斯函数拟合到数据集。左图显示的是单个高斯函数的拟合结果，中间的图显示的是两个高斯函数的拟合结果，右图显示的是三个高斯函数的拟合结果。*
+
+For this example I used [curve\_fit](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve_fit.html) \[4\] from the scipy optimization library, which uses a non-linear least squares algorithm. Notice how as I added more Gaussians, the resulting sum became a better approximation of the raw data.  
+在这个例子中，我使用了 scipy 优化库中的 [curve\_fit](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve_fit.html) \[4\] 函数，它采用非线性最小二乘算法。请注意，随着我添加更多高斯函数，最终得到的和式能够更好地近似原始数据。
+
+### Fitting On a Sphere适配球面
+
+So far we’ve been fitting 1D data sets, but the techniques we’re using also work in multiple dimensions. So for instance, let’s say we had a bunch of scattered samples in random directions on a sphere defined by a 2D spherical coordinate system. And let’s say that these samples represent something like…oh I don’t know…the amount of incoming lighting along an infinitesimally narrow ray oriented in that direction. If we take all of these data points and throw some least squares at it, we can end up with a series of N Spherical Gaussians whose sum can serve as an approximation for radiance in any direction on the sphere! We just need our fitting algorithm to spit out the axis, amplitude, and sharpness of each Gaussian, or if we want can fix one of more of the SG parameters ahead of time and only fit the remaining parameters. It should be immediately obvious why this is useful, since a set of SG coefficients can be stored very compactly compared to a gigantic set of radiance samples. Of course if we only use a few Gaussians the resulting approximation will probably lose details from the original radiance function, but this is no different from spherical harmonics or other common techniques for storing approximate representations of radiance or irradiance. Let’s take a look at what a fit actually looks like using an HDR environment map as input data:  
+到目前为止，我们一直在拟合一维数据集，但我们使用的技术也适用于多维情况。例如，假设我们有一堆散布在由二维球坐标系定义的球面上的随机方向的样本。假设这些样本代表某种东西，比如……我不知道……沿着该方向的无限细光线入射的光量。如果我们把所有这些数据点都进行最小二乘法拟合，最终可以得到一系列 N 个球面高斯函数，它们的总和可以近似表示球面上任意方向的辐射亮度！我们只需要拟合算法输出每个高斯函数的轴、振幅和锐度，或者，如果我们愿意，可以预先固定一个或多个球面高斯函数参数，然后只拟合剩余的参数。这有什么用处显而易见，因为与庞大的辐射亮度样本集相比，一组球面高斯函数系数可以非常紧凑地存储。当然，如果我们只使用几个高斯函数，得到的近似值可能会丢失原始辐射函数的一些细节，但这与球谐函数或其他常用的辐射或辐照度近似表示方法并无本质区别。让我们来看看使用 HDR 环境贴图作为输入数据时，拟合结果的实际效果：
+
+![SGFit_Comparison_LS_Alt](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sgfit_comparison_ls_alt.png)
+
+*Approximating radiance on a sphere using a sum of Spherical Gaussians. The left image shows the original source radiance function taken from an HDR environment map. The middle image shows a least squares fit of 12 SG’s, and right image shows a fit of 24 SG’s.  
+使用球面高斯函数之和来近似球面上的辐射亮度。左图显示了从 HDR 环境贴图中提取的原始光源辐射亮度函数。中间图显示了 12 个球面高斯函数的最小二乘拟合结果，右图显示了 24 个球面高斯函数的拟合结果。*
+
+These images were generated [Yuriy O’Donnell](https://twitter.com/YuriyODonnell) ‘s [Probulator](https://github.com/kayru/Probulator) \[5\], which is an excellent tool for comparing various ways of approximating radiance and irradiance on a sphere. One important thing to note here is that the fit was only performed on the amplitude of the SG’s: the axis and sharpness are pre-determined based on the number of SG’s. Probulator generates the lobe axis directions using [Vogel’s method](http://blog.marmakoide.org/?p=1) \[6\], but any technique for distributing points on a sphere would also work. Fitting only the lobe amplitude significantly simplifies the solve, since there are less parameters to optimize. Solving for a single parameter also allows us to use [linear least squares](https://en.wikipedia.org/wiki/Linear_least_squares_\(mathematics\)) \[7\], while fitting all of the parameters would require use of complex and expensive [non-linear least squares](https://en.wikipedia.org/wiki/Non-linear_least_squares) \[8\] algorithms. Solving for less parameters also decreases the storage costs, since only the amplitudes need to be stored per-probe while the directions and sharpness can be global constants. Either way it’s good to keep in mind when examining the results. In particular it helps explain why the white lobe in the middle image doesn’t quite line up with the bright windows in the source environment. Aside from that, the results are probably what you would expect: doubling the number of lobes increases the possible complexity and sharpness of the resulting approximation, which in this case allows it to provide a better representation of some of the high-frequency details in the source image.  
+这些图像由 [Yuriy O'Donnell](https://twitter.com/YuriyODonnell) 的 [Probulator](https://github.com/kayru/Probulator) \[5\] 生成，Probulator 是一个优秀的工具，可用于比较球面上各种近似辐射率和辐照度的方法。需要注意的是，拟合仅针对 SG 的振幅进行：轴线和清晰度是根据 SG 的数量预先确定的。Probulator 使用 [Vogel 方法](http://blog.marmakoide.org/?p=1) \[6\] 生成瓣叶轴线方向，但任何在球面上分布点的技术也适用。仅拟合瓣叶振幅显著简化了求解过程，因为需要优化的参数更少。求解单个参数还允许我们使用 [线性最小二乘](https://en.wikipedia.org/wiki/Linear_least_squares_\(mathematics\)) 法 \[7\]，而拟合所有参数则需要使用复杂且计算量巨大的 [非线性最小二乘法](https://en.wikipedia.org/wiki/Non-linear_least_squares) \[8\] 算法。求解较少的参数还可以降低存储成本，因为每个探针只需存储振幅，而方向和清晰度可以是全局常数。无论如何，在分析结果时，记住这一点很有帮助。尤其重要的是，它有助于解释为什么中间图像中的白色光瓣与源环境中的明亮窗口并不完全对齐。除此之外，结果可能符合预期：光瓣数量翻倍会增加最终近似图像的复杂性和清晰度，在本例中，这使得它能够更好地呈现源图像中的一些高频细节。
+
+### Going Negative 转负
+
+One odd thing you might notice in the SG approximation is the overly dark areas towards the bottom-right of the sphere. They look somewhat similar to the darkening that can show up in SH approximations, which happens due to negative coefficients being used for the SH polynomials. It turns out that something very similar is happening with our SG fit: the least squares optimizations is returning negative coefficients for some of our lobes in an attempt to minimize the error of the resulting fit.If you’re having trouble understanding why this would happen, let’s go back to 1D for a quick example. For the last 1D example I cheated a bit: the data we were fitting our Gaussians to was actually just some random noise applied to the sum of 3 Gaussians. This is why our Gaussian fit so closely resembled the source data. This time, we’ll fitting some lobes to a more complex data set:  
+在 SG 近似中，你可能会注意到一个奇怪的现象：球体右下角区域过暗。它们看起来有点像 SH 近似中出现的暗区，这是由于 SH 多项式使用了负系数造成的。事实上，我们的 SG 拟合也出现了非常类似的情况：最小二乘优化为了最小化拟合误差，对某些瓣片返回了负系数。如果你难以理解为什么会发生这种情况，让我们回到一维情况，举个简单的例子。在上一个一维例子中，我稍微“作弊”了一下：我们用来拟合高斯函数的数据实际上只是对三个高斯函数之和施加了一些随机噪声。这就是为什么我们的高斯拟合与源数据如此接近的原因。这次，我们将用一个更复杂的数据集来拟合一些瓣片：
+
+[![LS_Negative_Fit_Data](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/ls_negative_fit_data.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/ls_negative_fit_data.png)
+
+*A data set with a discontinuity near 0, making it more difficult to fit curves to.  
+数据集在 0 附近存在不连续点，这使得曲线拟合更加困难。*
+
+This time the data has a bunch of values near the center that have a value of zero. With such a data set it’s now less obvious how a sum of Gaussians could approximate the values. If we throw least squares at the problem and have it fit two lobes, we get the following:  
+这次的数据在中心附近有很多值为零的值。对于这样的数据集，高斯函数之和如何近似这些值就变得不太明显了。如果我们用最小二乘法来解决这个问题，并让它拟合两个瓣，我们会得到以下结果：
+
+[![LS_Negative_Fit](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/ls_negative_fit.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/ls_negative_fit.png)
+
+*The result of using least squares to fit 2 Gaussian lobes to the above data set. The left graph shows the first lobe (red), the middle graph shows the second lobe (green), and the right graph shows the sum of the two lobes (blue) overlaid onto the original data set.  
+这是使用最小二乘法将两个高斯瓣拟合到上述数据集的结果。左图显示第一个瓣（红色），中间图显示第二个瓣（绿色），右图显示两个瓣之和（蓝色），并叠加在原始数据集上。*
+
+This time around the optimization resulted in a positive amplitude for the first lobe, but a *negative* amplitude for the second lobe. Looking at the sum overlaid onto to the data makes it clear why this happened: the positive lobe takes care of the all of the positive data points to the left and right, while the negative lobe brings the sum closer to zero in the middle of the graph. Upon closer inspection the negative actually causes the approximation to dip *below* zero into the negatives. We can assume that having this dip results in lower overall error for the approximation, since that’s how least squares works.  
+这次优化结果是第一个瓣的振幅为正，而第二个瓣的振幅为 *负* 。观察叠加在数据上的求和曲线可以清楚地理解原因：正瓣负责处理左右两侧的所有正数据点，而负瓣则使图表中间的求和值更接近于零。仔细观察后发现，负瓣实际上会导致近似值 *低于* 零，进入负值区域。我们可以假设，这种下降会导致近似值的整体误差降低，因为最小二乘法正是如此运作的。
+
+In practice, having negative coefficients and negative values from our approximation can be undesirable. In fact when approximating radiance or irradiance negative values really just don’t make sense, since they’re physically impossible. In our experience we also found that the visual result of lighting a scene with negative lobes can be quite displeasing, since it tends to look very unnatural to have surfaces that are completely dark. Perhaps you remember this image from the first article showing what L2 SH looks like with a bright area light in the environment:  
+实际上，近似值出现负系数和负值可能是不理想的。事实上，在近似计算辐射率或辐照度时，负值根本没有意义，因为它们在物理上是不可能的。根据我们的经验，我们还发现，使用负光瓣照亮场景的视觉效果可能相当糟糕，因为完全黑暗的表面看起来非常不自然。也许您还记得第一篇文章中的这张图片，它展示了在环境中存在明亮区域光源时 L2 SH 的效果：
+
+[![sh_ringing_comparison](https://mynameismjp.wordpress.com/wp-content/uploads/2016/09/sh_ringing_comparison.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/09/sh_ringing_comparison.png)
+
+*A sphere with a Lambertian diffuse BRDF being lit by a lighting environment with a strong area light source. The left image shows the ground-truth result of using monte-carlo integration. The middle image shows the result of projecting radiance onto L2 SH, and then computing irradiance. The right image shows the result of applying a windowing function to the L2 SH coefficients before computing irradiance.  
+一个具有朗伯漫反射 BRDF 的球体被强面光源照射。左图显示了使用蒙特卡罗积分得到的真实值结果。中间图显示了将辐射度投影到 L2 SH 上并计算辐照度的结果。右图显示了在计算辐照度之前对 L2 SH 系数应用窗口函数的结果。*
+
+We found that character faces in particular tended to look really bad when our SH light probes had strong negative lobes, and this turned out to be one of our motivations for investigating alternative approximations. We also ran into some trouble when attempting to compress signed floating point values in BC6H textures: some compressors didn’t even support compressing to that format, and those that did had noticeably worse quality.  
+我们发现，当 SH 光探针的负瓣较强时，人物面部图像尤其糟糕，这也促使我们去研究其他近似方法。此外，我们在尝试压缩 BC6H 纹理中的有符号浮点值时也遇到了一些问题：有些压缩器甚至不支持这种格式，而支持这种格式的压缩器压缩后的图像质量明显更差。
+
+With that in mind, it would be nice to constrain a least squares solver in such a way that it only gave us positive coefficients. Fortunately for us such a technique exists, and it’s known as [non-negative least squares](https://en.wikipedia.org/wiki/Non-negative_least_squares) \[9\] (or NNLS for short). If we use that technique for fitting SG’s to our original radiance function instead of standard least squares, we get this result instead:  
+考虑到这一点，如果能对最小二乘求解器进行约束，使其只给出正系数，那就太好了。幸运的是，这样的技术是存在的，它被称为 [非负最小二乘法](https://en.wikipedia.org/wiki/Non-negative_least_squares) \[9\]（简称 NNLS）。如果我们使用这种技术而不是标准最小二乘法来拟合 SG 到原始辐射函数，我们会得到以下结果：
+
+[![SGFit_Comparison_NNLS_Alt](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sgfit_comparison_nnls_alt.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sgfit_comparison_nnls_alt.png)
+
+*Fitting SG’s to a radiance function using a non-negative least squares solver. The left image shows the original source radiance function taken from an HDR environment map. The middle image shows an NNLS fit of 12 SG’s, and right image shows a fit of 24 SG’s.  
+使用非负最小二乘法求解器将 SG 拟合到辐射函数。左图显示了从 HDR 环境贴图中提取的原始源辐射函数。中间图显示了 12 个 SG 的 NNLS 拟合结果，右图显示了 24 个 SG 的拟合结果。*
+
+This time we don’t have the dark areas in the bottom right, since the fit only uses positive lobes. But unfortunately there’s no free lunch here, since the resulting approximation is also a bit “blurrier” compared to the normal least squares fit.  
+这次右下角没有出现暗区，因为拟合只使用了正瓣。但可惜的是，没有免费的午餐，因为与普通的最小二乘拟合相比，得到的近似结果也略显“模糊”。
+
+### Comparing Irradiance 比较辐照度
+
+Now that we’ve covered how to generate an SG approximation of radiance from source data, we can take a look at how well it stacks up against other options for a simple use case. Probably the most obvious application is computing irradiance from the radiance approximation, which can be directly used to compute standard Lambertian diffuse lighting. The following images were captured using Probulator, and they show the Stanford Bunny being lit using a few common techniques for approximating irradiance:  
+现在我们已经了解了如何从源数据生成 SG 近似辐射率，接下来我们可以看看它在一个简单的应用场景中与其他方法相比表现如何。最显而易见的应用可能是利用辐射率近似值计算辐照度，而辐照度可以直接用于计算标准的朗伯漫射光照。以下图片使用 Probulator 软件拍摄，展示了斯坦福兔子模型在几种常用辐照度近似技术下的光照效果：
+
+[![Probe_Basis_Comparison_Pisa](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/probe_basis_comparison_pisa.png?w=1178)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/probe_basis_comparison_pisa.png)
+
+*A bunny model being lit by various irradiance approximations generated from the “Pisa” HDR environment map  
+一只兔子模型正在接受由“比萨”HDR 环境贴图生成的各种辐照度近似值的照明。*
+
+With the exception of Valve’s Ambient Cube, all of the approximations hold up very well when compared with the ground truth. The non-negative least squares fit is just a bit more washed out than the least squares fit, but both seem to produce perfectly acceptable results. The SH result is also very good, with no noticeable ringing artifacts. However this particular environment is a somewhat easier case, as the range of intensities isn’t as large as you might find in some realistic lighting scenarios. For a more extreme case, let’s now look at a comparison using the “Ennis” environment map:  
+除了 Valve 的 Ambient Cube 之外，所有近似值与真实值相比都表现得非常出色。非负最小二乘拟合比最小二乘拟合略显苍白，但两者都产生了完全可以接受的结果。SH 的结果也非常好，没有明显的振铃伪影。然而，这个特定的环境相对来说比较简单，因为其强度范围不像某些真实光照场景那样大。为了更极端地比较，我们现在来看看使用“Ennis”环境贴图的对比：
+
+[![Probe_Basis_Comparison](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/probe_basis_comparison.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/probe_basis_comparison.png)  
+*A bunny model being lit by various irradiance approximations generated from the “Ennis” HDR environment map  
+一只兔子模型正在接受由“Ennis”HDR 环境贴图生成的各种辐照度近似值的照明。*
+
+This time there’s a much more noticeable difference between the various techniques. This is because the source environment map has a very bright window to the left, which effectively serves as a large area light source. With this particular environment the SG results start to compare pretty favorably to the SH or ambient cube approximations. The results from L2 SH have severe ringing artifacts, which manifests as areas that are either too dark or too bright on the side of the bunny facing to the right. Meanwhile, the windowed version of L2 SH blurs the lighting too much, making it appear as if the environment is more uniform than it really is. The ambient cube probe doesn’t suffer from ringing, but it does have problems with the bright lighting from the left bleeding onto the top and side of the bunny. Looking at the least squares solve for 12 SG’s, the result is pretty nice but there is a bit of ringing evident on the upper-right side of the bunny model. This ringing isn’t present in the non-negative least squares solve, since all of the coefficients end up being positive.  
+这次各种技术之间的差异更加明显。这是因为源环境贴图左侧有一个非常明亮的窗口，实际上充当了一个大面积光源。在这种特定环境下，SG 的结果开始与 SH 或环境立方体近似方法相媲美。L2 SH 的结果存在严重的振铃伪影，表现为兔子右侧出现过暗或过亮的区域。同时，L2 SH 的窗口化版本过度模糊了光照，使环境看起来比实际情况更加均匀。环境立方体探针没有振铃伪影，但左侧的强光会溢出到兔子的顶部和侧面。观察 12 个 SG 的最小二乘解，结果相当不错，但在兔子模型的右上角仍然可以看到一些振铃伪影。这种振铃现象在非负最小二乘法求解中并不存在，因为所有系数最终都为正数。
+
+As I mentioned earlier, these Probulator comparisons use fixed lobe directions and sharpness. Consequently we only need to store amplitude, meaning that the storage cost of the 12 SG lobes is equivalent to 12 sets of floating-point RGB coefficients (36 floats total). L2 SH requires 9 sets of RGB coefficients, which adds up to 27 floats. The ambient cube requires only 6 sets of RGB coefficents, which is half that of the SG solve. So for this particular comparison the SG representation of radiance requires the most storage, however this highlights one of the nice points using SG as your basis: you can solve for any number of lobes you’d like, allowing you to choose easily trade off quality vs. storage and performance cost. Valve’s ambient cube is only defined for 6 lobes, and that number can’t be increased since the lobes must remain orthogonal to each other.  
+正如我之前提到的，这些 Probulator 对比使用了固定的波瓣方向和锐度。因此，我们只需要存储振幅，这意味着 12 个 SG 波瓣的存储成本相当于 12 组浮点 RGB 系数（总共 36 个浮点数）。L2 SH 需要 9 组 RGB 系数，总共 27 个浮点数。环境立方体只需要 6 组 RGB 系数，是 SG 解算所需系数的一半。因此，对于这个特定的对比，SG 的辐射度表示需要最多的存储空间，但这凸显了以 SG 为基础的一个优点：您可以求解任意数量的波瓣，从而轻松地在质量与存储和性能成本之间进行权衡。Valve 的环境立方体仅定义了 6 个波瓣，并且由于波瓣必须彼此正交，因此无法增加波瓣的数量。
+
+### Fitting on a Hemisphere半球形适配
+
+For full lighting probes where the sampling surface can have any orientation, storing the radiance or irradiance on a sphere makes perfect sense. However it makes less sense if we would like to store baked lighting in 2D textures where all of the sample points lie on the surface of a mesh. For that case storing data for a full sphere is wasteful, since half of the data will point “into” the surface and therefore won’t be useful. With SG’s this is fairly trivial to correct: we can just choose to solve for lobes that only lie on the upper hemisphere surrounding the surface’s normal direction.  
+对于采样面可以任意方向的完整光照探针，将辐射率或辐照度存储在球体上是完全合理的。然而，如果我们想将烘焙光照存储在二维纹理中，而所有采样点都位于网格表面上，那么这种方法就不太合理了。在这种情况下，存储整个球体的数据是浪费的，因为一半的数据会指向表面内部，因此无法使用。使用 SG 算法可以轻松解决这个问题：我们可以选择只求解位于围绕表面法线方向的上半球上的光瓣。
+
+[![SG_Probe_vs_Hemisphere](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_probe_vs_hemisphere1.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_probe_vs_hemisphere1.png)
+
+*The left side shows a configuration where 9 SG lobes are distributed about a sphere, forming a full spherical probe. The right side shows 5 SG lobes located on a hemisphere surrounding the normal of a surface (the blue arrow).*
+
+To fully generate the compact radiance representation for an entire 2D lightmap, we need to gather radiance samples at every texel location, and then perform a solve to fit the samples to a set of SG lobes. It’s really no different from the spherical probe case we used as a testbed in Probulator, except now we’re generating many probes. The other main differences is that for lightmap generating the appropriate radiance requires sampling a full 3D scene, as opposed to using an environment map as we did with Probulator. This sort of problem is best solved with a ray tracer, using an algorithm such as path tracing to compute the incoming radiance for a particular ray. The following image shows a visualization of what the lightmap result looks like for a simple scene:
+
+[![SG_Debug_Visualizer](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_debug_visualizer.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_debug_visualizer.png)
+
+*Hemispherical radiance probes generated at the texel locations of a 2D lightmap applied to a simple scene. Each probe uses 9 SG lobes oriented about the surface normal of the underlying geometry.*
+
+### Specular
+
+In the previous article we covered techniques that can be used to compute a specular term from SG light sources. If we apply them to a set of lobes that approximate the incoming radiance, then we can compute an approximation of the full environment specular response. For small lobe counts this is only going to be practical for materials with a relatively high roughness. This is because our SG approximation of the incoming radiance won’t be able to capture high-frequency details from the environment, and it would it be very obvious if those details were missing from the reflections on smooth surfaces. However for rougher surfaces where the BRDF itself starts to act as a low-pass filter, an SG approximation won’t have as much noticeable error. As an example, here’s what SG specular looks like for a test scene with a GGX roughness value of 0.25:
+
+[![BakingLab_IndirectSpecular_Comparison](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/bakinglab_indirectspecular_comparison.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/bakinglab_indirectspecular_comparison.png)
+
+*Comparison of indirect specular approximation for a test scene with a GGX roughness of 0.25. The top-left image is a path-traced rendering of the final scene with full indirect and direct lighting. The top-right image shows the indirect environment specular term from SG9 lightmaps, with the exposure increased by 8x. The bottom left image shows the indirect specular term from L2 SH. The bottom right image shows the indirect specular term from a path-traced render of the scene.*
+
+Compared to the ground truth, the SG approximation does pretty well in some places and not-so-well in others. In general it captures a lot of the overall specular response, but suffers from some of the higher-frequency detail being absent in the probes. This results in certain areas looking a bit “washed-out”, such as the right-most wall of the scene. You can also see that the reflections of the cylinder, sphere, and torus are not properly represented in the SG version for the same reason. On the positive side, lightmap samples are pretty dense in terms of their spatial distribution. They’re far more dense than what you typically achieve with sparse cubemap probes placed throughout the scene, which typically suffer from all kinds of occlusion and parallax artifacts. The SG specular also compares pretty favorably to the L2 SH result (despite having the same storage cost), which looks even more washed-out than the SG result. The SH implementation used a 3D lookup texture to store pre-computed SH coefficients, and you can see some interpolation artifacts from this method if you look at the far wall perpendicular to the camera.
+
+### Implementation in The Order: 1886
+
+In the first part of our [presentation](http://blog.selfshadow.com/publications/s2015-shading-course/rad/s2015_pbs_rad_slides.pptx) \[10\] at last year’s [Physically Based Shading Course](http://blog.selfshadow.com/publications/s2015-shading-course/) \[11\], Dave covered some of these details and also shared some information about how we implemented SG lighting probes into The Order: 1886. Much of the implementation was very similar to what I’ve described in this series of articles: we stored 5-12 SG lobes (the count was chosen per-level chunk) in our 2D lightmaps with fixed axis directions and sharpnesses, and we evaluated diffuse and specular lighting using the approximations that I outlined earlier. For dynamic meshes, we baked uniform 3D grids of spherical probes containing 9 SG lobes that were stored in 3D textures. The grids were defined by OBB’s that were hand-placed in the scene by our lighting artists, along with density parameters. In both cases we made use of hardware texture filtering to interpolate between neighboring probes before computing per-pixel lighting.
+
+Much of our implementation closely followed the work of [Wang](http://renpr.org/project/sg_ssdf.htm) \[12\] and [Xu](http://cg.cs.tsinghua.edu.cn/people/~kun/asg/) \[13\], at least in terms of the techniques used for approximating diffuse and specular lighting from a set of SG lobes. Where our work diverged quite a bit was in the choice to use fixed lobe directions and sharpness values. Both Wang and Xu generated their set of SG lobes by performing a solve on a single environment map, which produced the necessary axis, sharpness, and amplitude parameters. In our case, we always knew that we were going need many probes in order to maintain high-fidelity pre-computed lighting for our scenes. At the time (early 2014) we were already employing 2D lightmaps containing L1 H-basis hemispherical probes (4 coefficients) and 3D grids containing L2 spherical harmonics probes. Both could be quite dense in spatial terms, which allowed capturing important shadowing detail.
+
+To make SG’s work with for these requirements, we had to carefully consider our available trade-offs. After getting a simple test-bed up and running where we could bake 2D lightmaps for a scene, it became quickly apparent that varying the axis directions per-texel wasn’t necessarily the best choice for us. Aside from the obvious issue of requiring more storage space and making the solve more complex and expensive, we also ran into issues resulting from interpolating the axis direction over a surface. The problem is most readily apparent at shadow boundaries: one texel might have visibility of a bright light source which causes a lobe to point in that direction, while its neighboring pixel might have no visibility and thus could end up with a lobe pointing in a completely different direction. The axis would then interpolate between the two directions for pixels between the two texels, which can cause noticeable specular shifting. This isn’t necessarily an unsolvable problem (the [Frequency Domain Normal Map Filtering paper](http://www.cs.columbia.edu/cg/normalmap/) \[14\] extended their EM solver with a term that attempts to align neighboring lobes for coherency), but considering our time and memory constraints it made sense to just sidestep the problem altogether. Ultimately we ended up using fixed lobe directions, using the UV tangent frame as the local coordinate space for lightmap probes. Tangent space is natural for this purpose since it’s Z axis is the surface normal of the mesh, and also because it tends to be continuous over a mesh (you’ll have discontinuities wherever you have UV seams, but artists tend to hide those as best they can anyway). For the 3D probe grids, the directions were in world space for simplicity.
+
+After deciding to fix the lobe directions, we also ultimately decided to go with a fixed sharpness value as well. This of course has the same obvious benefits as fixing the axis direction (less storage, simpler solve), which were definitely appealing. However another motivating factor came from the way were doing our solve. Or rather, our lack of a proper solve. Our early testbed performed all lightmap baking on the CPU, which allowed us to easily integrate packages like [Eigen](http://eigen.tuxfamily.org/index.php?title=Main_Page) \[15\] so that we could use a battle-tested least squares solver. However our actual production baking farm at Ready at Dawn uses a Cuda baker that leverages Nvidia’s OptiX library to perform arbitrary ray tracing on a cluster of GPU’s.While Cuda does have optimization libraries that could have achieved what we wanted, we faced a bigger problem: memory. Our baker worked by baking many sample points in parallel on the GPU, with a kernel program that would generate and trace the many rays required for monte carlo integration. When we previously used SH and H-basis this approach worked well: both SH and H-basis are built upon orthogonal basis functions, which allows for continuous integration by projecting each sample onto those basis functions. Gathering thousands of samples per-texel is feasible with this setup, since those samples don’t need to be explicitly stored in memory. Instead, each new sample is projected onto the in-progress result for the texel and then discarded. This is not the case when performing a solve: the solver needs access to *all* of the samples, which means keeping them all around in memory. This is a big problem when you have many texels in flight simultaneously, and only a limited amount of GPU memory. Like the intepolation issue it’s probably not unsolveable, but we really looking for a less risky approach that would be more of a drop-in replacement for the SH integration.
+
+Ultimately we ended up saying “screw it”, and projected on the SG lobes as they formed an orthogonal basis (even though they didn’t). Since the basis functions weren’t orthogonal the results ended up rather blurry compared to a least squares solve, which muddied some of the detail in the source environment for a probe. Here’s a comparison to show you what I mean:
+
+[![SG_Radiance_Solve_Comparison](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_radiance_solve_comparison.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_radiance_solve_comparison.png)
+
+*A comparison of different techniques for computing a set of SG lobes that approximate the radiance from an environment map*
+
+Of the three techniques presented here, the naive projection is the worst at capturing the details from the source map and also the blurriest. As we saw earlier the least squares solve is the best at capturing sharp changes, but achieves this by over-darkening certain areas. NNLS is the “just right” fit for this particular case, doing a better job of capturing details compared to the projection but without using any negative lobes.
+
+Before we switched to baking SG probes for our grids and lightmaps, we had a fairly standard system for applying pre-convolved cubemap probes that were hand-placed throughout our scenes. Previously these were our only source of environment specular lighting, but once we had SG’s working we began to to use the SG specular approximation to compute environment specular directly from lightmaps and probe grids. Obviously our low number of SG’s was not sufficient for accurately approximating environment specular for smooth and mirror-like surfaces, so our cubemap system remained relevent. We ended up coming up with a simple scheme to choose between cubemap and lightmap specular per-pixel based on the surface roughness, with a small zone in between where we would blend between the two specular sources. The following images taken from our SIGGRAPH slides use a color-coding to showing the specular source chosen for each pixel from one of our scenes:
+
+[![SG_Cubemap_Transition_00](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_cubemap_transition_00.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/sg_cubemap_transition_00.png)
+
+*The top image shows a scene from The Order: 1886. The bottom image shows the same scene with a color coding applied to show the environment specular source for each pixel.*
+
+To finish off, here’s some more comparison images taken from our SIGGRAPH slides:
+
+[![TheOrder_SGComparison_00](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/theorder_sgcomparison_00.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/theorder_sgcomparison_00.png)
+
+[![TheOrder_SGComparison_01](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/theorder_sgcomparison_01.png)](https://mynameismjp.wordpress.com/wp-content/uploads/2016/08/theorder_sgcomparison_01.png)
+
+*Several comparison images from The Order: 1886 showing scenes with and without environment specular from SG lightmaps  
+《秩序：1886》中的几张对比图，展示了使用和不使用 SG 光照贴图的环境镜面反射效果的场景。*
+
+### Future Work 未来工作
+
+We were quite happy with the improvements that come from the SG baking pipeline we introduced for The Order, but we also feel like we’ve barely scratched the surface. Our decision to use fixed lobe directions and sharpness values was probably the right one, but it also limits what we can do. When you take SG’s and compare them to a fixed set of basis functions like SH, perhaps the biggest advantage is the fact that you can use an arbitrary combination of lobes to represent a mix of high and low-frequency features. So for instance you can represent a sun and a sky by having one wide lobe with the sky color, and one very narrow and bright lobe oriented towards the sun. We gave up that flexibility when we decided to go with our simpler ad-hoc projection, and it’s something we’d like to explore further in the future. But until then we can at least enjoy the benefits of having a representation that allows for an environment specular approximation and also avoids ringing artifacts when approximating diffuse lighting.  
+我们对为《教团》引入的 SG 烘焙流程带来的改进感到非常满意，但我们也觉得这只是冰山一角。我们决定使用固定的瓣方向和锐度值或许是正确的，但这同时也限制了我们能做的事情。当你将 SG 与一组固定的基函数（例如 SH）进行比较时，SG 最大的优势或许在于，你可以使用任意瓣组合来表示高频和低频特征的混合。例如，你可以用一个宽阔的、天空颜色的瓣和一个指向太阳的非常窄且明亮的瓣来表示太阳和天空。当我们决定采用更简单的临时投影时，我们放弃了这种灵活性，这是我们未来想要进一步探索的方向。但在此之前，我们至少可以享受到这种表示方法带来的好处：它既可以近似环境镜面反射，又可以避免在近似漫反射光照时出现振铃伪影。
+
+Aside from the solve, I also think it would be worth taking the time to investigate better approximations for the specular BRDF. In particular I would like to try using something better than just evaluating the cosine, Fresnel, and shadow-masking terms at the center of the warped BRDF lobe. The assumption that those terms are constant over the lobe break down the most when the roughness is high, and in our case we’re only ever using SG specular for rough materials! Therefore I think it would be worth the effort to come up with a more accurate representation of those terms.  
+除了求解之外，我认为还值得花时间研究更好的镜面反射 BRDF 近似方法。特别是，我想尝试使用比仅仅计算扭曲 BRDF 瓣中心处的余弦项、菲涅尔项和阴影掩蔽项更好的方法。假设这些项在整个瓣上保持不变，在粗糙度较高时，这个假设就不成立了，而我们这里只对粗糙材质使用 SG 镜面反射！因此，我认为值得努力找到更精确的这些项的表示方法。
+
+### References 参考
+
+\[1\] Curve fitting – [https://en.wikipedia.org/wiki/Curve\_fitting](https://en.wikipedia.org/wiki/Curve_fitting)  
+\[1\] 曲线拟合 – [https://en.wikipedia.org/wiki/Curve\_fitting](https://en.wikipedia.org/wiki/Curve_fitting)  
+\[2\] Regression analysis – [https://en.wikipedia.org/wiki/Regression\_analysis](https://en.wikipedia.org/wiki/Regression_analysis)  
+\[2\] 回归分析 – [https://en.wikipedia.org/wiki/Regression\_analysis](https://en.wikipedia.org/wiki/Regression_analysis)  
+\[3\] Least squares – [https://en.wikipedia.org/wiki/Least\_squares](https://en.wikipedia.org/wiki/Least_squares)  
+\[3\] 最小二乘法 – [https://en.wikipedia.org/wiki/Least\_squares](https://en.wikipedia.org/wiki/Least_squares)  
+\[4\] scipy.optimize.curve\_fit – [http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve\_fit.html#scipy-optimize-curve-fit](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve_fit.html#scipy-optimize-curve-fit)  
+\[4\] scipy.optimize.curve\_fit – [http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve\_fit.html#scipy-optimize-curve-fit](http://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.curve_fit.html#scipy-optimize-curve-fit)  
+\[5\] Probulator – [https://github.com/kayru/Probulator](https://github.com/kayru/Probulator)  
+\[5\] Probulator – [https://github.com/kayru/Probulator](https://github.com/kayru/Probulator)  
+\[6\] Spreading points on a disc and on a sphere – [http://blog.marmakoide.org/?p=1](http://blog.marmakoide.org/?p=1)  
+\[6\] 圆盘和球面上的扩散点 – [http://blog.marmakoide.org/?p=1](http://blog.marmakoide.org/?p=1)  
+\[7\] Linear least squares – [https://en.wikipedia.org/wiki/Linear\_least\_squares\_(mathematics)](https://en.wikipedia.org/wiki/Linear_least_squares_\(mathematics\))  
+\[7\] 线性最小二乘法 – [https://en.wikipedia.org/wiki/Linear\_least\_squares\_(mathematics)](https://en.wikipedia.org/wiki/Linear_least_squares_\(mathematics\))  
+\[8\] Non-linear least squares – [https://en.wikipedia.org/wiki/Non-linear\_least\_squares](https://en.wikipedia.org/wiki/Non-linear_least_squares)  
+\[8\] 非线性最小二乘法 – [https://en.wikipedia.org/wiki/Non-linear\_least\_squares](https://en.wikipedia.org/wiki/Non-linear_least_squares)  
+\[9\] Non-negative least squares – [https://en.wikipedia.org/wiki/Non-negative\_least\_squares](https://en.wikipedia.org/wiki/Non-negative_least_squares)  
+\[9\] 非负最小二乘法 – [https://en.wikipedia.org/wiki/Non-negative\_least\_squares](https://en.wikipedia.org/wiki/Non-negative_least_squares)  
+\[10\] Advanced Lighting R&D at Ready At Dawn Studios – [http://blog.selfshadow.com/publications/s2015-shading-course/rad/s2015\_pbs\_rad\_slides.pptx](http://blog.selfshadow.com/publications/s2015-shading-course/rad/s2015_pbs_rad_slides.pptx)  
+\[10\] Ready At Dawn Studios 的高级照明研发 – [http://blog.selfshadow.com/publications/s2015-shading-course/rad/s2015\_pbs\_rad\_slides.pptx](http://blog.selfshadow.com/publications/s2015-shading-course/rad/s2015_pbs_rad_slides.pptx)  
+\[11\] SIGGRAPH 2015 Course: Physically Based Shading in Theory and Practice – [http://blog.selfshadow.com/publications/s2015-shading-course/](http://blog.selfshadow.com/publications/s2015-shading-course/)  
+\[11\] SIGGRAPH 2015 课程：基于物理的着色理论与实践 – [http://blog.selfshadow.com/publications/s2015-shading-course/](http://blog.selfshadow.com/publications/s2015-shading-course/)  
+\[12\] All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance – [http://renpr.org/project/sg\_ssdf.htm](http://renpr.org/project/sg_ssdf.htm)  
+\[12\] 动态空间变化反射率的全频渲染 – [http://renpr.org/project/sg\_ssdf.htm](http://renpr.org/project/sg_ssdf.htm)  
+\[13\] Anisotropic Spherical Gaussians – [http://cg.cs.tsinghua.edu.cn/people/~kun/asg/](http://cg.cs.tsinghua.edu.cn/people/~kun/asg/)  
+\[13\] 各向异性球面高斯分布 – [http://cg.cs.tsinghua.edu.cn/people/~kun/asg/](http://cg.cs.tsinghua.edu.cn/people/~kun/asg/)  
+\[14\] Frequency Domain Normal Map Filtering – [http://www.cs.columbia.edu/cg/normalmap/](http://www.cs.columbia.edu/cg/normalmap/)  
+\[14\] 频域法线贴图滤波 – [http://www.cs.columbia.edu/cg/normalmap/](http://www.cs.columbia.edu/cg/normalmap/)  
+\[15\] Eigen – [http://eigen.tuxfamily.org/index.php?title=Main\_Page](http://eigen.tuxfamily.org/index.php?title=Main_Page)  
+\[15\] 本征 – [http://eigen.tuxfamily.org/index.php?title=Main\_Page](http://eigen.tuxfamily.org/index.php?title=Main_Page)
