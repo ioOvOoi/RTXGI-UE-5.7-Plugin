@@ -203,7 +203,7 @@ public:
 		bool bSGDiffuseEnabled = true;
 		bool bSGSpecularEnabled = true;
 		float SGHysteresis = 0.95f;
-		float SGSpecularMinRoughness = 0.5f;
+		float SGSpecularMinRoughness = -1.0f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
@@ -487,9 +487,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
 	float SGHysteresis = 0.95f;
 
-	// User-controlled roughness value used by the current SG rough specular prototype.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
-	float SGSpecularMinRoughness = 0.5f;
+	// SG specular roughness override. -1 uses material roughness from GBuffer; 0..1 forces a debug roughness value.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
+	float SGSpecularMinRoughness = -1.0f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")

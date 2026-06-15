@@ -82,6 +82,8 @@ float4 ApplyVolumeLightingContribution(
     float3 VolumeRadius,
     DDGIVolumeDescGPU Volume,
     float3 Albedo,
+    float MaterialRoughness,
+    float3 MaterialSpecularColor,
     float BlendDistance,
     float BlendDistanceBlack,
     float ApplyLighting,
@@ -115,9 +117,9 @@ float4 ApplyVolumeLightingContribution(
             int probeCount2D_SG = Volume.probeGridCounts.y * Volume.probeGridCounts.z;
 
             // Accumulate blended SG amplitudes across 8 neighboring probes
-            float3 blendedAmps[12];
+            float3 blendedAmps[SG_LOBE_COUNT];
             float  totalWeight = 0;
-            for (int kk = 0; kk < 12; ++kk) blendedAmps[kk] = float3(0, 0, 0);
+            for (int kk = 0; kk < SG_LOBE_COUNT; ++kk) blendedAmps[kk] = float3(0, 0, 0);
 
             for(int pi = 0; pi < 8; ++pi)
             {
@@ -184,16 +186,17 @@ float4 ApplyVolumeLightingContribution(
             #endif
                 int sgBase = (sgProbeIndex % probeCount2D_SG) * SGLobeCount;
                 int sgRow = sgProbeIndex / probeCount2D_SG;
-                for(int k = 0; k < SGLobeCount && k < 12; ++k)
+                for(int k = 0; k < SGLobeCount && k < SG_LOBE_COUNT; ++k)
                     blendedAmps[k] += ProbeSGTexture[int2(sgBase + k, sgRow)].rgb * weight;
                 totalWeight += weight;
             }
 
             // Normalize blended amplitudes
             if(totalWeight > 0)
-                for(int k = 0; k < 12; ++k) blendedAmps[k] /= totalWeight;
+                for(int k = 0; k < SG_LOBE_COUNT; ++k) blendedAmps[k] /= totalWeight;
 
-            float roughness = saturate(SGSpecularRoughness);
+            float roughness = (SGSpecularRoughness >= 0.0f) ? saturate(SGSpecularRoughness) : saturate(MaterialRoughness);
+            float3 F0 = saturate(MaterialSpecularColor);
             float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps);
             float3 SGDiffuse = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
 
@@ -205,7 +208,7 @@ float4 ApplyVolumeLightingContribution(
             else if(SGLightingMode == 3)
             {
                 // SG specular-only debug view
-                LightWeight.rgb = RTXGISGSpecular(Normal, CameraDirection, roughness, blendedAmps) / IrradianceScalar;
+                LightWeight.rgb = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps) / IrradianceScalar;
             }
             else if(SGLightingMode == 4)
             {
@@ -229,15 +232,15 @@ float4 ApplyVolumeLightingContribution(
             {
                 // SG directional radiance debug: evaluate reconstructed radiance along surface normal
                 float3 Radiance = float3(0, 0, 0);
-                for(int k = 0; k < 12; ++k)
+                for(int k = 0; k < SG_LOBE_COUNT; ++k)
                     Radiance += blendedAmps[k] * RTXGISGEvaluate(Normal, k);
                 LightWeight.rgb = Radiance / IrradianceScalar;
             }
             else
             {
                 // Mode 2: SG diffuse + rough specular
-                float3 SGSpec = RTXGISGSpecular(Normal, CameraDirection, roughness, blendedAmps);
-                LightWeight.rgb = SGDiffuse + (SGSpec * 0.15f / IrradianceScalar);
+                float3 SGSpec = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps);
+                LightWeight.rgb = SGDiffuse + (SGSpec / IrradianceScalar);
             }
 
             // NaN guard
@@ -310,7 +313,11 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 #endif
     float3 Normal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
     float3 BaseColor = DecodeBaseColor(BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).rgb);
-    float Metallic = MetallicTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+    float4 PackedMaterial = MetallicTexture.SampleLevel(PointClampSampler, BufferUV, 0);
+    float Metallic = PackedMaterial.r;
+    float Specular = PackedMaterial.g;
+    float MaterialRoughness = saturate(PackedMaterial.b);
+    float3 MaterialSpecularColor = lerp(0.08f * Specular.xxx, BaseColor, Metallic.xxx);
     float3 CameraDirection = normalize(InScreenVector);
 
     float3 Albedo = 1.0f;
@@ -372,6 +379,8 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
                 DDGIVolume_##x##_Radius, \
                 DDGIVolume_##x, \
                 Albedo, \
+                MaterialRoughness, \
+                MaterialSpecularColor, \
                 DDGIVolume_##x##_BlendDistance, \
                 DDGIVolume_##x##_BlendDistanceBlack, \
                 DDGIVolume_##x##_ApplyLighting, \

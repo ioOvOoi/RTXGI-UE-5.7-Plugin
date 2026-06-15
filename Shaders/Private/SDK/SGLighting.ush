@@ -14,18 +14,6 @@
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
 // SG lighting helpers for evaluating SG radiance probe data.
-// Operates on SG amplitude arrays (per-probe per-lobe RGB amplitudes).
-
-// Approximate inner product of two SG lobes with identical axes:
-//   ∫ G_k(v) * G_j(v) dv ≈ 2π / (λ_k + λ_j) * exp((λ_k*λ_j)/(λ_k+λ_j) * (dot(μ_k,μ_j) - 1))
-// For our fixed-basis case (same axis set, same sharpness λ per lobe):
-//   InnerProduct_self = π * (1 - exp(-2λ)) / λ  (when axes are identical)
-float RTXGISGSelfInnerProduct()
-{
-	// Uniform sharpness case: analytic integral of G * G over sphere
-	return RTXGI_PI * (1.0f - exp(-2.0f * RTXGI_SG_UNIFORM_SHARPNESS)) / RTXGI_SG_UNIFORM_SHARPNESS;
-}
-
 // Evaluate SG radiance at a given direction
 float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[SG_LOBE_COUNT])
 {
@@ -62,29 +50,34 @@ float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[SG_LOBE_COUNT])
 	return irradiance;
 }
 
-// Evaluate rough specular from SG radiance using a GGX-BRDF-as-SG approximation.
-// Roughness: perceptual roughness (0..1).
-// Normal, View: world-space unit vectors.
-float3 RTXGISGSpecular(float3 Normal, float3 View, float Roughness, float3 Amplitudes[SG_LOBE_COUNT])
+// Compact UE-style environment BRDF approximation for material-aware indirect specular.
+// F0 is UE-compatible specular color, roughness and NoV are material/view terms.
+float3 RTXGISGEnvBRDFApprox(float3 F0, float Roughness, float NoV)
+{
+	// Jimenez/Lazarov-style split-sum approximation commonly used for real-time IBL.
+	float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+	float4 c1 = float4( 1.0f,  0.0425f,  1.040f, -0.040f);
+	float4 r = Roughness * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
+	float2 AB = float2(-1.04f, 1.04f) * a004 + r.zw;
+	return F0 * AB.x + AB.y;
+}
+
+// Material-aware rough SG specular for DDGI probe radiance.
+float3 RTXGISGSpecularIBL(float3 Normal, float3 View, float Roughness, float3 F0, float3 Amplitudes[SG_LOBE_COUNT])
 {
 	float3 N = normalize(Normal);
-	// View is the camera ray direction in this shader. Reflect that incident ray around
-	// the normal to sample incoming probe radiance in an IBL-style direction.
+	float3 V = normalize(-View);
+	float NoV = saturate(dot(N, V));
 	float3 R = normalize(reflect(View, N));
 
-	// Conservative specular prototype: sample reconstructed SG radiance along the
-	// reflection direction instead of using a sharp BRDF-as-SG inner product. The previous
-	// inner-product approximation created circular/conical artifacts without full GGX
-	// geometry/Fresnel/material terms. Roughness stays user controlled and only scales
-	// energy until real GBuffer roughness/F0 integration is added.
 	float perceptualRoughness = saturate(Roughness);
-	float3 specular = RTXGISGEvaluateRadiance(R, Amplitudes);
+	float3 radiance = RTXGISGEvaluateRadiance(R, Amplitudes);
+	float3 brdf = RTXGISGEnvBRDFApprox(F0, perceptualRoughness, NoV);
 
-	// Prevent below-surface reflection contribution and make very low roughness less
-	// dominant while still allowing users to test the full 0..1 roughness range.
+	// Probe-based specular is only stable on the visible side of the surface.
 	float horizon = saturate(dot(N, R));
-	float roughEnergy = lerp(0.25f, 1.0f, perceptualRoughness);
-	return specular * horizon * roughEnergy;
+	return radiance * brdf * horizon;
 }
 
 #endif // RTXGI_SG_LIGHTING_USH

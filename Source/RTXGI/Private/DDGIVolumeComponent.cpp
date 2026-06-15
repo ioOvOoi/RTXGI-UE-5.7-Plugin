@@ -112,8 +112,8 @@ static TAutoConsoleVariable<float> CVarSGHysteresis(
 
 static TAutoConsoleVariable<float> CVarSGSpecularMinRoughness(
 	TEXT("r.RTXGI.DDGI.SG.Specular.MinRoughness"),
-	0.5f,
-	TEXT("Roughness value used by the current SG rough specular prototype. 0=sharpest test, 1=broadest rough reflection.\n"),
+	-1.0f,
+	TEXT("SG specular roughness override. -1=use material roughness from GBuffer, 0..1=force debug roughness for all materials.\n"),
 	ECVF_RenderThreadSafe);
 
 //static FCriticalSection GDDGIReadbackCS;
@@ -208,6 +208,7 @@ public:
 		OutEnvironment.SetDefine(TEXT("VOLUME_LIST"), volumeMacroList.GetCharArray().GetData());
 
 		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_PROBE_CLASSIFICATION"), FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_PROBE_CLASSIFICATION ? 1 : 0);
+		OutEnvironment.SetDefine(TEXT("SG_LOBE_COUNT"), 16);
 
 		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
@@ -863,7 +864,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 
 				// SG lighting parameters
 				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Max(1, volumeProxy->ComponentData.SGLobeCount);
-				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, 0.0f, 1.0f);
+				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
 				// CVar lighting mode override. -1 means use the Volume panel value.
 				{
 					static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
@@ -1451,7 +1452,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.bSGDiffuseEnabled = bSGDiffuseEnabled && CVarSGDiffuse.GetValueOnGameThread();
 		ComponentData.bSGSpecularEnabled = bSGSpecularEnabled && CVarSGSpecular.GetValueOnGameThread();
 		ComponentData.SGHysteresis = FMath::Clamp(bGlobalSGEnabled ? CVarSGHysteresis.GetValueOnGameThread() : SGHysteresis, 0.0f, 1.0f);
-		ComponentData.SGSpecularMinRoughness = FMath::Clamp(bGlobalSGEnabled ? CVarSGSpecularMinRoughness.GetValueOnGameThread() : SGSpecularMinRoughness, 0.0f, 1.0f);
+		ComponentData.SGSpecularMinRoughness = FMath::Clamp(bGlobalSGEnabled ? CVarSGSpecularMinRoughness.GetValueOnGameThread() : SGSpecularMinRoughness, -1.0f, 1.0f);
 
 		if (ScrollProbesInfinitely)
 		{
