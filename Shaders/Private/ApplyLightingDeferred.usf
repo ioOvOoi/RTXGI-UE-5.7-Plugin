@@ -34,7 +34,6 @@ float4              ScaledViewSizeAndInvSize;
 int2                ScaledViewOffset;
 uint                ShouldUsePreExposure;
 uint                NumVolumes;
-float               SGSpecularMinRoughness;
 
 // generate an array of structures for each probe volume
 #define VOLUME_ENTRY(x) \
@@ -59,7 +58,8 @@ float               SGSpecularMinRoughness;
     int3   DDGIVolume_##x##_ProbeScrollOffsets; \
     float  DDGIVolume_##x##_IrradianceScalar; \
     int    DDGIVolume_##x##_SGLobeCount; \
-    int    DDGIVolume_##x##_SGLightingMode;
+    int    DDGIVolume_##x##_SGLightingMode; \
+    float  DDGIVolume_##x##_SGSpecularRoughness;
 VOLUME_LIST
 #undef VOLUME_ENTRY
 
@@ -73,6 +73,7 @@ float4 ApplyVolumeLightingContribution(
     Texture2D<uint> ProbeStates,
     int SGLobeCount,
     int SGLightingMode,
+    float SGSpecularRoughness,
     float3 WorldPosition,
     float3 Normal,
     float3 CameraDirection,
@@ -192,7 +193,7 @@ float4 ApplyVolumeLightingContribution(
             if(totalWeight > 0)
                 for(int k = 0; k < 12; ++k) blendedAmps[k] /= totalWeight;
 
-            float roughness = SGSpecularMinRoughness > 0 ? SGSpecularMinRoughness : 0.5f;
+            float roughness = saturate(SGSpecularRoughness);
             float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps);
             float3 SGDiffuse = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
 
@@ -362,6 +363,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
                 DDGIVolume_##x##_ProbeStates, \
                 DDGIVolume_##x##_SGLobeCount, \
                 DDGIVolume_##x##_SGLightingMode, \
+                DDGIVolume_##x##_SGSpecularRoughness, \
                 WorldPosition, \
                 Normal, \
                 CameraDirection, \

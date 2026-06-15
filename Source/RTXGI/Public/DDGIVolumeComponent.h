@@ -463,8 +463,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SG Lighting")
 	bool bSGEnabled = false;
 
-	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "3"))
+	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG directional radiance debug.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
 	int32 SGLightingMode = 0;
 
 	// Number of fixed world-space SG lobes per probe. Supported development tiers are 12 and 16.
@@ -487,8 +487,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
 	float SGHysteresis = 0.95f;
 
-	// Minimum material roughness for future SG rough specular contribution.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	// User-controlled roughness value used by the current SG rough specular prototype.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
 	float SGSpecularMinRoughness = 0.5f;
 
 	// Blueprint Nodes

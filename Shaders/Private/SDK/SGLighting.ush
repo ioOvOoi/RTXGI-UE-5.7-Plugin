@@ -67,26 +67,24 @@ float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[SG_LOBE_COUNT])
 // Normal, View: world-space unit vectors.
 float3 RTXGISGSpecular(float3 Normal, float3 View, float Roughness, float3 Amplitudes[SG_LOBE_COUNT])
 {
-	float3 H = normalize(View + Normal);
+	float3 N = normalize(Normal);
+	// View is the camera ray direction in this shader. Reflect that incident ray around
+	// the normal to sample incoming probe radiance in an IBL-style direction.
+	float3 R = normalize(reflect(View, N));
 
-	// Match the GGX lobe to an SG.
-	// Approximate GGX(θ, α) as exp(-tan²(θ)/α²) → SG with axis = H, sharpness = 2/α²
-	float alpha = Roughness * Roughness;
-	float specSharpness = 2.0f / max(alpha, 0.0001f);
+	// Conservative specular prototype: sample reconstructed SG radiance along the
+	// reflection direction instead of using a sharp BRDF-as-SG inner product. The previous
+	// inner-product approximation created circular/conical artifacts without full GGX
+	// geometry/Fresnel/material terms. Roughness stays user controlled and only scales
+	// energy until real GBuffer roughness/F0 integration is added.
+	float perceptualRoughness = saturate(Roughness);
+	float3 specular = RTXGISGEvaluateRadiance(R, Amplitudes);
 
-	float3 specular = float3(0.0f, 0.0f, 0.0f);
-
-	for (int k = 0; k < SG_LOBE_COUNT; ++k)
-	{
-		float cosTheta = dot(H, RTXGI_SG_AXES[k]);
-		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + specSharpness;
-		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * specSharpness) / sumLambda;
-
-		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
-
-		specular += Amplitudes[k] * innerProduct;
-	}
-	return specular;
+	// Prevent below-surface reflection contribution and make very low roughness less
+	// dominant while still allowing users to test the full 0..1 roughness range.
+	float horizon = saturate(dot(N, R));
+	float roughEnergy = lerp(0.25f, 1.0f, perceptualRoughness);
+	return specular * horizon * roughEnergy;
 }
 
 #endif // RTXGI_SG_LIGHTING_USH

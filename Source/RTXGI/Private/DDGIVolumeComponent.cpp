@@ -76,8 +76,8 @@ static TAutoConsoleVariable<bool> CVarSGEnable(
 
 static TAutoConsoleVariable<int32> CVarSGLightingMode(
 	TEXT("r.RTXGI.DDGI.SG.LightingMode"),
-	0,
-	TEXT("SG DDGI lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG radiance direction debug.\n"),
+	-1,
+	TEXT("SG DDGI lighting mode override. -1=Use Volume panel, 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG radiance direction debug.\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarSGLobeCount(
@@ -113,7 +113,7 @@ static TAutoConsoleVariable<float> CVarSGHysteresis(
 static TAutoConsoleVariable<float> CVarSGSpecularMinRoughness(
 	TEXT("r.RTXGI.DDGI.SG.Specular.MinRoughness"),
 	0.5f,
-	TEXT("Minimum roughness for future SG rough specular contribution. Lower roughness remains on the existing reflection stack.\n"),
+	TEXT("Roughness value used by the current SG rough specular prototype. 0=sharpest test, 1=broadest rough reflection.\n"),
 	ECVF_RenderThreadSafe);
 
 //static FCriticalSection GDDGIReadbackCS;
@@ -143,6 +143,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
 	// SG metadata per volume (no SRV cost)
 	SHADER_PARAMETER(int, SGLobeCount)
 	SHADER_PARAMETER(int, SGLightingMode)
+	SHADER_PARAMETER(float, SGSpecularRoughness)
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
@@ -158,7 +159,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(FIntPoint, ScaledViewOffset)
 	SHADER_PARAMETER(int32, ShouldUsePreExposure)
 	SHADER_PARAMETER(int32, NumVolumes)
-	SHADER_PARAMETER(float, SGSpecularMinRoughness)
 	// Global SG amplitude texture (single slot, avoids per-volume SRV overflow)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeSGTexture)
 	// Volumes are sorted from densest probes to least dense probes
@@ -804,7 +804,6 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
-			PassParameters->SGSpecularMinRoughness = CVarSGSpecularMinRoughness.GetValueOnRenderThread();
 			PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -864,14 +863,13 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 
 				// SG lighting parameters
 				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Max(1, volumeProxy->ComponentData.SGLobeCount);
-				// CVar as override: when SG is globally enabled, use CVar lighting mode
+				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, 0.0f, 1.0f);
+				// CVar lighting mode override. -1 means use the Volume panel value.
 				{
 					static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
-					static IConsoleVariable* CVarSGEnableRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.Enable"));
-					if (CVarSGEnableRT && CVarSGEnableRT->GetBool() && CVarSGLightingModeRT)
-						PassParameters->DDGIVolume[volumeIndex].SGLightingMode = CVarSGLightingModeRT->GetInt();
-					else
-						PassParameters->DDGIVolume[volumeIndex].SGLightingMode = volumeProxy->ComponentData.SGLightingMode;
+					const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
+					PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
+						(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
 				}
 
 				// Bind global SG amplitude texture (last SG volume wins, fine for single-volume case)
