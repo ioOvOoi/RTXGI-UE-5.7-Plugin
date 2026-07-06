@@ -865,18 +865,18 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				// Apply the lighting multiplier to artificially lighten or darken the indirect light from the volume
 				PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
 
-				// SG lighting parameters
-				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
-PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
+// SG lighting parameters
+			PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
+			PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
 			PassParameters->DDGIVolume[volumeIndex].bSGDiffuseEnabled = volumeProxy->ComponentData.bSGDiffuseEnabled ? 1 : 0;
 			PassParameters->DDGIVolume[volumeIndex].bSGSpecularEnabled = volumeProxy->ComponentData.bSGSpecularEnabled ? 1 : 0;
 			// CVar lighting mode override. -1 means use the Volume panel value.
 			{
-					static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
-					const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
-					PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
-						(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
-				}
+				static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
+				const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
+				PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
+					(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
+			}
 
 				// Bind global SG amplitude texture (last SG volume wins, fine for single-volume case)
 				if (volumeProxy->ProbesSGAmplitudes)
@@ -1447,8 +1447,8 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.IrradianceScalar = IrradianceScalar;
 		ComponentData.EmissiveMultiplier = EmissiveMultiplier;
 		ComponentData.LightingMultiplier = LightMultiplier;
-		ComponentData.RuntimeStatic = RuntimeStatic;
-ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
+ComponentData.RuntimeStatic = RuntimeStatic;
+		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
 		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
 		// ponytail: SGLightingMode CVar hot-reload is handled by RenderDiffuseIndirectLight_RenderThread.
