@@ -140,10 +140,13 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
 	SHADER_PARAMETER(float, BlendDistanceBlack)
 	SHADER_PARAMETER(float, ApplyLighting)
 	SHADER_PARAMETER(float, IrradianceScalar)
-	// SG metadata per volume (no SRV cost)
+// SG metadata per volume (no SRV cost)
 	SHADER_PARAMETER(int, SGLobeCount)
 	SHADER_PARAMETER(int, SGLightingMode)
 	SHADER_PARAMETER(float, SGSpecularRoughness)
+	// ponytail: SG diffuse/specular toggles consumed by ApplyVolumeLightingContribution
+	SHADER_PARAMETER(int, bSGDiffuseEnabled)
+	SHADER_PARAMETER(int, bSGSpecularEnabled)
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
@@ -864,9 +867,11 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 
 				// SG lighting parameters
 				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
-				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
-				// CVar lighting mode override. -1 means use the Volume panel value.
-				{
+PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
+			PassParameters->DDGIVolume[volumeIndex].bSGDiffuseEnabled = volumeProxy->ComponentData.bSGDiffuseEnabled ? 1 : 0;
+			PassParameters->DDGIVolume[volumeIndex].bSGSpecularEnabled = volumeProxy->ComponentData.bSGSpecularEnabled ? 1 : 0;
+			// CVar lighting mode override. -1 means use the Volume panel value.
+			{
 					static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
 					const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
 					PassParameters->DDGIVolume[volumeIndex].SGLightingMode =

@@ -57,9 +57,11 @@ uint                NumVolumes;
     float  DDGIVolume_##x##_ApplyLighting; \
     int3   DDGIVolume_##x##_ProbeScrollOffsets; \
     float  DDGIVolume_##x##_IrradianceScalar; \
-    int    DDGIVolume_##x##_SGLobeCount; \
+int    DDGIVolume_##x##_SGLobeCount; \
     int    DDGIVolume_##x##_SGLightingMode; \
-    float  DDGIVolume_##x##_SGSpecularRoughness;
+    float  DDGIVolume_##x##_SGSpecularRoughness; \
+    int    DDGIVolume_##x##_bSGDiffuseEnabled; \
+    int    DDGIVolume_##x##_bSGSpecularEnabled;
 VOLUME_LIST
 #undef VOLUME_ENTRY
 
@@ -70,10 +72,12 @@ float4 ApplyVolumeLightingContribution(
     Texture2D<float4> ProbeIrradiance,
     Texture2D<float4> ProbeDistance,
     Texture2D<float4> ProbeOffsets,
-    Texture2D<uint> ProbeStates,
+Texture2D<uint> ProbeStates,
     int SGLobeCount,
     int SGLightingMode,
     float SGSpecularRoughness,
+    int bSGDiffuseEnabled,
+    int bSGSpecularEnabled,
     float3 WorldPosition,
     float3 Normal,
     float3 CameraDirection,
@@ -103,10 +107,13 @@ float4 ApplyVolumeLightingContribution(
 
     float4 LightWeight = 0.f;
 
-    // Get irradiance from the DDGIVolume
+// Get irradiance from the DDGIVolume
     if (ApplyLighting > 0.0f)
     {
-        if (SGLightingMode > 0 && SGLobeCount > 0)
+        // ponytail: both SG toggles off (or mode 0) -> fall through to the octahedral path
+        bool bSGActive = (SGLightingMode > 0) && (SGLobeCount > 0)
+            && (bSGDiffuseEnabled != 0 || bSGSpecularEnabled != 0);
+        if (bSGActive)
         {
             // Coefficient-first SG blending with 8-probe DDGI visibility
             float3 biasedWorldPosition = WorldPosition + DDGIGetSurfaceBias(Normal, CameraDirection, Volume);
@@ -201,15 +208,17 @@ float4 ApplyVolumeLightingContribution(
             float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps, ClampedSGLobeCount);
             float3 SGDiffuse = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
 
-            if(SGLightingMode == 1)
+if(SGLightingMode == 1)
             {
-                // SG diffuse only
-                LightWeight.rgb = SGDiffuse;
+                // SG diffuse only (subject to diffuse toggle; falls back to 0 if off)
+                LightWeight.rgb = (bSGDiffuseEnabled != 0) ? SGDiffuse : float3(0, 0, 0);
             }
             else if(SGLightingMode == 3)
             {
-                // SG specular-only debug view
-                LightWeight.rgb = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount) / IrradianceScalar;
+                // SG specular-only debug view (subject to specular toggle)
+                LightWeight.rgb = (bSGSpecularEnabled != 0)
+                    ? RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount) / IrradianceScalar
+                    : float3(0, 0, 0);
             }
             else if(SGLightingMode == 4)
             {
@@ -237,11 +246,14 @@ float4 ApplyVolumeLightingContribution(
                     Radiance += blendedAmps[k] * RTXGISGEvaluate(Normal, k, ClampedSGLobeCount);
                 LightWeight.rgb = Radiance / IrradianceScalar;
             }
-            else
+else
             {
-                // Mode 2: SG diffuse + rough specular
-                float3 SGSpec = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount);
-                LightWeight.rgb = SGDiffuse + (SGSpec / IrradianceScalar);
+                // Mode 2: SG diffuse + rough specular, gated by the per-volume toggles
+                float3 SGSpec = (bSGSpecularEnabled != 0)
+                    ? RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount)
+                    : float3(0, 0, 0);
+                float3 SGDiff = (bSGDiffuseEnabled != 0) ? SGDiffuse : float3(0, 0, 0);
+                LightWeight.rgb = SGDiff + (SGSpec / IrradianceScalar);
             }
 
             // NaN guard
@@ -369,9 +381,11 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
                 DDGIVolume_##x##_ProbeDistance, \
                 DDGIVolume_##x##_ProbeOffsets, \
                 DDGIVolume_##x##_ProbeStates, \
-                DDGIVolume_##x##_SGLobeCount, \
+DDGIVolume_##x##_SGLobeCount, \
                 DDGIVolume_##x##_SGLightingMode, \
                 DDGIVolume_##x##_SGSpecularRoughness, \
+                DDGIVolume_##x##_bSGDiffuseEnabled, \
+                DDGIVolume_##x##_bSGSpecularEnabled, \
                 WorldPosition, \
                 Normal, \
                 CameraDirection, \
