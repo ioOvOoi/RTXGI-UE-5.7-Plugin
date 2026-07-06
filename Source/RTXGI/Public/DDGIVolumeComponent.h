@@ -198,7 +198,7 @@ public:
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 		bool bSGEnabled = false;
 		int32 SGLightingMode = 0;
-		int32 SGLobeCount = 12;
+		int32 SGLobeCount = 16;
 		int32 SGPrecision = 0;
 		bool bSGDiffuseEnabled = true;
 		bool bSGSpecularEnabled = true;
@@ -270,7 +270,7 @@ static FIntPoint GetDistanceTextureDimensions(FIntVector ProbeCounts)
 
 static FIntPoint GetSGAmplitudeTextureDimensions(FIntVector ProbeCounts, int32 SGLobeCount)
 {
-	return FIntPoint(Get2DProbeCount(ProbeCounts).X * FMath::Max(1, SGLobeCount), Get2DProbeCount(ProbeCounts).Y);
+	return FIntPoint(Get2DProbeCount(ProbeCounts).X * FMath::Clamp(SGLobeCount, 4, 32), Get2DProbeCount(ProbeCounts).Y);
 }
 
 static int32 GetProbeCount(FIntVector ProbeCounts)
@@ -467,9 +467,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
 	int32 SGLightingMode = 0;
 
-	// Number of fixed world-space SG lobes per probe. Supported development tiers are 12 and 16.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "12", ClampMax = "16"))
-	int32 SGLobeCount = 12;
+	// Number of runtime Fibonacci SG lobes per probe. Higher counts improve directional detail at higher GPU/memory cost.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "4", ClampMax = "32", UIMin = "4", UIMax = "32"))
+	int32 SGLobeCount = 16;
 
 	// SG amplitude precision target. 0=FP16 target, 1=FP32 validation target.
 	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))

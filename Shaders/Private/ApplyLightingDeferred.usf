@@ -117,9 +117,10 @@ float4 ApplyVolumeLightingContribution(
             int probeCount2D_SG = Volume.probeGridCounts.y * Volume.probeGridCounts.z;
 
             // Accumulate blended SG amplitudes across 8 neighboring probes
-            float3 blendedAmps[SG_LOBE_COUNT];
+            int ClampedSGLobeCount = RTXGISGClampLobeCount(SGLobeCount);
+            float3 blendedAmps[RTXGI_MAX_SG_LOBE_COUNT];
             float  totalWeight = 0;
-            for (int kk = 0; kk < SG_LOBE_COUNT; ++kk) blendedAmps[kk] = float3(0, 0, 0);
+            for (int kk = 0; kk < RTXGI_MAX_SG_LOBE_COUNT; ++kk) blendedAmps[kk] = float3(0, 0, 0);
 
             for(int pi = 0; pi < 8; ++pi)
             {
@@ -184,20 +185,20 @@ float4 ApplyVolumeLightingContribution(
             #else
                 int sgProbeIndex = adjIndex;
             #endif
-                int sgBase = (sgProbeIndex % probeCount2D_SG) * SGLobeCount;
+                int sgBase = (sgProbeIndex % probeCount2D_SG) * ClampedSGLobeCount;
                 int sgRow = sgProbeIndex / probeCount2D_SG;
-                for(int k = 0; k < SGLobeCount && k < SG_LOBE_COUNT; ++k)
+                for(int k = 0; k < ClampedSGLobeCount; ++k)
                     blendedAmps[k] += ProbeSGTexture[int2(sgBase + k, sgRow)].rgb * weight;
                 totalWeight += weight;
             }
 
             // Normalize blended amplitudes
             if(totalWeight > 0)
-                for(int k = 0; k < SG_LOBE_COUNT; ++k) blendedAmps[k] /= totalWeight;
+                for(int k = 0; k < ClampedSGLobeCount; ++k) blendedAmps[k] /= totalWeight;
 
             float roughness = (SGSpecularRoughness >= 0.0f) ? saturate(SGSpecularRoughness) : saturate(MaterialRoughness);
             float3 F0 = saturate(MaterialSpecularColor);
-            float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps);
+            float3 SGIrradiance = RTXGISGDiffuseIrradiance(Normal, blendedAmps, ClampedSGLobeCount);
             float3 SGDiffuse = SGIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
 
             if(SGLightingMode == 1)
@@ -208,7 +209,7 @@ float4 ApplyVolumeLightingContribution(
             else if(SGLightingMode == 3)
             {
                 // SG specular-only debug view
-                LightWeight.rgb = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps) / IrradianceScalar;
+                LightWeight.rgb = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount) / IrradianceScalar;
             }
             else if(SGLightingMode == 4)
             {
@@ -232,14 +233,14 @@ float4 ApplyVolumeLightingContribution(
             {
                 // SG directional radiance debug: evaluate reconstructed radiance along surface normal
                 float3 Radiance = float3(0, 0, 0);
-                for(int k = 0; k < SG_LOBE_COUNT; ++k)
-                    Radiance += blendedAmps[k] * RTXGISGEvaluate(Normal, k);
+                for(int k = 0; k < ClampedSGLobeCount; ++k)
+                    Radiance += blendedAmps[k] * RTXGISGEvaluate(Normal, k, ClampedSGLobeCount);
                 LightWeight.rgb = Radiance / IrradianceScalar;
             }
             else
             {
                 // Mode 2: SG diffuse + rough specular
-                float3 SGSpec = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps);
+                float3 SGSpec = RTXGISGSpecularIBL(Normal, CameraDirection, roughness, F0, blendedAmps, ClampedSGLobeCount);
                 LightWeight.rgb = SGDiffuse + (SGSpec / IrradianceScalar);
             }
 

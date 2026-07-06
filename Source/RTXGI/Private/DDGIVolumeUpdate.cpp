@@ -451,11 +451,10 @@ class FDDGISGProject : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FDDGISGProject)
 	SHADER_USE_PARAMETER_STRUCT(FDDGISGProject, FGlobalShader)
 
-	class FSGLobeCount : SHADER_PERMUTATION_SPARSE_INT("SG_LOBE_COUNT", 12, 16);
 	class FFormatRadiance : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_FORMAT_RADIANCE");
 	class FFormatIrradiance : SHADER_PERMUTATION_BOOL("RTXGI_DDGI_FORMAT_IRRADIANCE");
 
-	using FPermutationDomain = TShaderPermutationDomain<FSGLobeCount, FFormatRadiance, FFormatIrradiance>;
+	using FPermutationDomain = TShaderPermutationDomain<FFormatRadiance, FFormatIrradiance>;
 
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
@@ -474,6 +473,7 @@ class FDDGISGProject : public FGlobalShader
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(int, ProbeIndexStart)
 		SHADER_PARAMETER(int, ProbeIndexCount)
+		SHADER_PARAMETER(int, SGLobeCount)
 		SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FDDGIVolumeDescGPU, DDGIVolume)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DDGIVolumeRayDataUAV)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DDGIVolumeSGAmplitudeOutUAV)
@@ -1441,7 +1441,6 @@ void DebugShaderPlatformsDetailed()
 
 		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 		FDDGISGProject::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FDDGISGProject::FSGLobeCount>(VolProxy->ComponentData.SGLobeCount);
 		PermutationVector.Set<FDDGISGProject::FFormatRadiance>(highBitCount);
 		PermutationVector.Set<FDDGISGProject::FFormatIrradiance>(highBitCount);
 		TShaderMapRef<FDDGISGProject> ComputeShader(ShaderMap, PermutationVector);
@@ -1459,7 +1458,7 @@ void DebugShaderPlatformsDetailed()
 		DDGIVolumeDescGPU->probeGridCounts = VolProxy->ComponentData.ProbeCounts;
 		DDGIVolumeDescGPU->numRaysPerProbe = GetNumRaysPerProbe(VolProxy->ComponentData.RaysPerProbe);
 		DDGIVolumeDescGPU->probeRayRotationTransform = ProbeRayRotationTransform;
-		DDGIVolumeDescGPU->probeHysteresis = VolProxy->ComponentData.ProbeHysteresis;
+		DDGIVolumeDescGPU->probeHysteresis = VolProxy->ComponentData.SGHysteresis;
 
 		FDDGISGProject::FParameters DefaultPassParameters;
 		FDDGISGProject::FParameters* PassParameters = GraphBuilder.AllocParameters<FDDGISGProject::FParameters>();
@@ -1467,6 +1466,7 @@ void DebugShaderPlatformsDetailed()
 
 		PassParameters->ProbeIndexStart = VolProxy->ProbeIndexStart;
 		PassParameters->ProbeIndexCount = VolProxy->ProbeIndexCount;
+		PassParameters->SGLobeCount = VolProxy->ComponentData.SGLobeCount;
 		PassParameters->DDGIVolume = GraphBuilder.CreateUniformBuffer(DDGIVolumeDescGPU);
 		PassParameters->DDGIVolumeRayDataUAV = ProbesRadianceUAV;
 		PassParameters->DDGIVolumeSGAmplitudeOutUAV = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSGAmplitudes));

@@ -14,13 +14,13 @@
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
 // SG lighting helpers for evaluating SG radiance probe data.
-// Evaluate SG radiance at a given direction
-float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[SG_LOBE_COUNT])
+float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
 {
 	float3 result = float3(0.0f, 0.0f, 0.0f);
-	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	int Count = RTXGISGClampLobeCount(SGLobeCount);
+	for (int k = 0; k < Count; ++k)
 	{
-		float w = RTXGISGEvaluate(Direction, k);
+		float w = RTXGISGEvaluate(Direction, k, Count);
 		result += Amplitudes[k] * w;
 	}
 	return result;
@@ -29,32 +29,27 @@ float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[SG_LOBE_COUNT
 // Compute diffuse irradiance from SG radiance.
 // Approximates ∫ L(v) * max(0, dot(n,v)) dv using inner product
 // of each SG lobe with a fixed-width cosine SG approximation.
-float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[SG_LOBE_COUNT])
+float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
 {
-	// Cosine lobe approximated as an SG: axis = n, sharpness ≈ 2.0
-	// InnerProduct( G(μ,λ), G_cosine(n,λ_cos) )
 	static const float CosineSharpness = 2.0f;
+	float3 N = normalize(Normal);
 	float3 irradiance = float3(0.0f, 0.0f, 0.0f);
+	int Count = RTXGISGClampLobeCount(SGLobeCount);
 
-	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	for (int k = 0; k < Count; ++k)
 	{
-		float cosTheta = dot(normalize(Normal), RTXGI_SG_AXES[k]);
+		float cosTheta = dot(N, RTXGISGGetAxis(k, Count));
 		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + CosineSharpness;
 		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * CosineSharpness) / sumLambda;
-
-		// Approximate inner product of two SG lobes
 		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
-
 		irradiance += Amplitudes[k] * innerProduct;
 	}
 	return irradiance;
 }
 
 // Compact UE-style environment BRDF approximation for material-aware indirect specular.
-// F0 is UE-compatible specular color, roughness and NoV are material/view terms.
 float3 RTXGISGEnvBRDFApprox(float3 F0, float Roughness, float NoV)
 {
-	// Jimenez/Lazarov-style split-sum approximation commonly used for real-time IBL.
 	float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
 	float4 c1 = float4( 1.0f,  0.0425f,  1.040f, -0.040f);
 	float4 r = Roughness * c0 + c1;
@@ -64,7 +59,7 @@ float3 RTXGISGEnvBRDFApprox(float3 F0, float Roughness, float NoV)
 }
 
 // Material-aware rough SG specular for DDGI probe radiance.
-float3 RTXGISGSpecularIBL(float3 Normal, float3 View, float Roughness, float3 F0, float3 Amplitudes[SG_LOBE_COUNT])
+float3 RTXGISGSpecularIBL(float3 Normal, float3 View, float Roughness, float3 F0, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
 {
 	float3 N = normalize(Normal);
 	float3 V = normalize(-View);
@@ -72,10 +67,9 @@ float3 RTXGISGSpecularIBL(float3 Normal, float3 View, float Roughness, float3 F0
 	float3 R = normalize(reflect(View, N));
 
 	float perceptualRoughness = saturate(Roughness);
-	float3 radiance = RTXGISGEvaluateRadiance(R, Amplitudes);
+	float3 radiance = RTXGISGEvaluateRadiance(R, Amplitudes, SGLobeCount);
 	float3 brdf = RTXGISGEnvBRDFApprox(F0, perceptualRoughness, NoV);
 
-	// Probe-based specular is only stable on the visible side of the surface.
 	float horizon = saturate(dot(N, R));
 	return radiance * brdf * horizon;
 }

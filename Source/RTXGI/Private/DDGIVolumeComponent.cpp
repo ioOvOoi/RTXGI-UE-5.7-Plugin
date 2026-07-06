@@ -82,8 +82,8 @@ static TAutoConsoleVariable<int32> CVarSGLightingMode(
 
 static TAutoConsoleVariable<int32> CVarSGLobeCount(
 	TEXT("r.RTXGI.DDGI.SG.LobeCount"),
-	12,
-	TEXT("Number of fixed SG lobes per DDGI probe. Supported values: 12 or 16.\n"),
+	-1,
+	TEXT("SG lobe count override. -1=use Volume panel value, 4..32=force runtime Fibonacci SG lobe count.\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<int32> CVarSGPrecision(
@@ -208,7 +208,7 @@ public:
 		OutEnvironment.SetDefine(TEXT("VOLUME_LIST"), volumeMacroList.GetCharArray().GetData());
 
 		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_PROBE_CLASSIFICATION"), FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_PROBE_CLASSIFICATION ? 1 : 0);
-		OutEnvironment.SetDefine(TEXT("SG_LOBE_COUNT"), 16);
+		OutEnvironment.SetDefine(TEXT("RTXGI_MAX_SG_LOBE_COUNT"), 32);
 
 		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
@@ -863,7 +863,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
 
 				// SG lighting parameters
-				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Max(1, volumeProxy->ComponentData.SGLobeCount);
+				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
 				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
 				// CVar lighting mode override. -1 means use the Volume panel value.
 				{
@@ -1446,8 +1446,10 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
 		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
-		ComponentData.SGLightingMode = FMath::Clamp(bGlobalSGEnabled ? CVarSGLightingMode.GetValueOnGameThread() : SGLightingMode, 0, 3);
-		ComponentData.SGLobeCount = ((bGlobalSGEnabled ? CVarSGLobeCount.GetValueOnGameThread() : SGLobeCount) >= 16) ? 16 : 12;
+		const int32 SGLightingModeOverride = CVarSGLightingMode.GetValueOnGameThread();
+		ComponentData.SGLightingMode = FMath::Clamp((SGLightingModeOverride >= 0) ? SGLightingModeOverride : SGLightingMode, 0, 5);
+		const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
+		ComponentData.SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : SGLobeCount, 4, 32);
 		ComponentData.SGPrecision = FMath::Clamp(bGlobalSGEnabled ? CVarSGPrecision.GetValueOnGameThread() : SGPrecision, 0, 1);
 		ComponentData.bSGDiffuseEnabled = bSGDiffuseEnabled && CVarSGDiffuse.GetValueOnGameThread();
 		ComponentData.bSGSpecularEnabled = bSGSpecularEnabled && CVarSGSpecular.GetValueOnGameThread();
