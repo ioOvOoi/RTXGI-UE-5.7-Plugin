@@ -90,7 +90,12 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 		}
 	}
 
-	// Normalize and write output per lobe with temporal hysteresis
+	// Normalize and write output per lobe with temporal hysteresis.
+	// Aligns our change/brightness thresholds and hysteresis reduction with the
+	// octa IrradianceBlend convention (ProbeBlendingCS.usf:327-338):
+	//   - change-threshold fires on per-lobe darkening delta (previous - newAmp),
+	//     matched by RTXGIMaxComponent; lowers hysteresis by 0.75 for near-instant snap;
+	//   - brightness-threshold clamps per-frame delta magnitude to 1/4 of itself.
 	float hysteresis = DDGIVolume.probeHysteresis;
 	for (int k = 0; k < clampedSGLobeCount; ++k)
 	{
@@ -99,8 +104,21 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 
 		// Read previous amplitude and blend (typed UAV load)
 		float3 oldAmp = DDGIVolumeSGAmplitudeOutUAV[outCoord].rgb;
-		float3 blended = lerp(newAmp, oldAmp, hysteresis);
 
+		// Lower hysteresis when a large lighting change is detected
+		if (RTXGIMaxComponent(oldAmp - newAmp) > DDGIVolume.probeChangeThreshold)
+		{
+			hysteresis = max(0.f, hysteresis - 0.75f);
+		}
+
+		// Clamp the maximum change per frame when a large brightness change is detected
+		float3 delta = newAmp - oldAmp;
+		if (length(delta) > DDGIVolume.probeBrightnessThreshold)
+		{
+			newAmp = oldAmp + (delta * 0.25f);
+		}
+
+		float3 blended = lerp(newAmp, oldAmp, hysteresis);
 		DDGIVolumeSGAmplitudeOutUAV[outCoord] = float4(blended, 0.0f);
 	}
 }
