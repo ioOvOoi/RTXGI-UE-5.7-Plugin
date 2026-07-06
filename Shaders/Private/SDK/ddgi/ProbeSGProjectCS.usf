@@ -13,6 +13,10 @@
 #include "/Plugin/RTXGI/Private/SDK/ddgi/Irradiance.ush"
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
+// Per-dispatch uniform (top-level SHADER_PARAMETER on FDDGISGProject::FParameters).
+// UE FGlobalShader does not auto-inject these declarations - declare explicitly.
+int SGLobeCount;
+
 // Input: ray radiance+distance atlas from probe trace pass (x=rayIndex, y=probeIndex)
 RWTexture2D<float4> DDGIVolumeRayDataUAV;
 // Output: per-probe SG amplitude atlas (x=baseLobeX+lobeIndex, y=probeY)
