@@ -1449,10 +1449,11 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.LightingMultiplier = LightMultiplier;
 		ComponentData.RuntimeStatic = RuntimeStatic;
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
-		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
+const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
 		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
-		const int32 SGLightingModeOverride = CVarSGLightingMode.GetValueOnGameThread();
-		ComponentData.SGLightingMode = FMath::Clamp((SGLightingModeOverride >= 0) ? SGLightingModeOverride : SGLightingMode, 0, 5);
+		// ponytail: SGLightingMode CVar hot-reload is handled by RenderDiffuseIndirectLight_RenderThread.
+		// ComponentData carries the panel value only, served as the fallback when CVar=-1.
+		ComponentData.SGLightingMode = FMath::Clamp(SGLightingMode, 0, 5);
 		const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
 		ComponentData.SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : SGLobeCount, 4, 32);
 		ComponentData.SGPrecision = FMath::Clamp(bGlobalSGEnabled ? CVarSGPrecision.GetValueOnGameThread() : SGPrecision, 0, 1);
