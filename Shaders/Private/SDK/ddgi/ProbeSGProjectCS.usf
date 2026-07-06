@@ -13,9 +13,11 @@
 #include "/Plugin/RTXGI/Private/SDK/ddgi/Irradiance.ush"
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
-// Per-dispatch uniform (top-level SHADER_PARAMETER on FDDGISGProject::FParameters).
+// Per-dispatch uniforms (top-level SHADER_PARAMETER on FDDGISGProject::FParameters).
 // UE FGlobalShader does not auto-inject these declarations - declare explicitly.
 int SGLobeCount;
+int ProbeIndexStart;
+int ProbeIndexCount;
 
 // Input: ray radiance+distance atlas from probe trace pass (x=rayIndex, y=probeIndex)
 RWTexture2D<float4> DDGIVolumeRayDataUAV;
@@ -31,6 +33,15 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	int probeIndex = int(DispatchThreadID.x);
 	int probeCount = DDGIVolume.probeGridCounts.x * DDGIVolume.probeGridCounts.y * DDGIVolume.probeGridCounts.z;
 	if (probeIndex >= probeCount) return;
+
+	// ponytail: round-robin guard — mirrors ProbeBlendingCS.usf:119-120.
+	// RTRadiance only writes ray data for probes in [ProbeIndexStart, ProbeIndexStart+ProbeIndexCount);
+	// every other probe's row in DDGIVolumeRayDataUAV is undefined/garbage this frame. Without this
+	// early-return, we'd re-project garbage into the SG amplitude atlas every frame, then the
+	// threshold-snap hysteresis (Phase 4 commit 3ff9f6d) would aggressively adopt that garbage,
+	// manifesting as RGB flicker in occluded / relocated / inactive probe regions.
+	int probeRRIndex = (probeIndex < ProbeIndexStart) ? probeIndex + probeCount : probeIndex;
+	if (probeRRIndex >= ProbeIndexStart + ProbeIndexCount) return;
 
 	int3 probeGridCounts = DDGIVolume.probeGridCounts;
 	int probeCount2D = probeGridCounts.y * probeGridCounts.z;
