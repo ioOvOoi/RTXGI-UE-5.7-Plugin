@@ -1451,7 +1451,7 @@ void DebugShaderPlatformsDetailed()
 		probeGridSpacing.Y = volumeSize.Y / float(VolProxy->ComponentData.ProbeCounts.Y);
 		probeGridSpacing.Z = volumeSize.Z / float(VolProxy->ComponentData.ProbeCounts.Z);
 
-		FDDGIVolumeDescGPU DefaultDDGIVolumeDescGPU;
+FDDGIVolumeDescGPU DefaultDDGIVolumeDescGPU;
 		FDDGIVolumeDescGPU* DDGIVolumeDescGPU = GraphBuilder.AllocParameters<FDDGIVolumeDescGPU>();
 		*DDGIVolumeDescGPU = DefaultDDGIVolumeDescGPU;
 		DDGIVolumeDescGPU->probeGridSpacing = probeGridSpacing;
@@ -1459,6 +1459,13 @@ void DebugShaderPlatformsDetailed()
 		DDGIVolumeDescGPU->numRaysPerProbe = GetNumRaysPerProbe(VolProxy->ComponentData.RaysPerProbe);
 		DDGIVolumeDescGPU->probeRayRotationTransform = ProbeRayRotationTransform;
 		DDGIVolumeDescGPU->probeHysteresis = VolProxy->ComponentData.SGHysteresis;
+		// ponytail: SG projection reads the same change/brightness thresholds as the octa
+		// blend (ProbeBlendingCS.usf). IrradianceBlend/DistanceBlend fill these; SGProject
+		// had been leaving them at 0, which made commit 3ff9f6d's threshold logic fire every
+		// frame and stall convergence. Mirror the sibling passes' assignments here.
+		DDGIVolumeDescGPU->probeChangeThreshold = VolProxy->ComponentData.ProbeChangeThreshold;
+		DDGIVolumeDescGPU->probeBrightnessThreshold = VolProxy->ComponentData.ProbeBrightnessThreshold;
+		DDGIVolumeDescGPU->probeScrollOffsets = VolProxy->ComponentData.ProbeScrollOffsets;
 
 		FDDGISGProject::FParameters DefaultPassParameters;
 		FDDGISGProject::FParameters* PassParameters = GraphBuilder.AllocParameters<FDDGISGProject::FParameters>();
