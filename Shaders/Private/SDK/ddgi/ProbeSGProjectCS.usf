@@ -13,10 +13,6 @@
 #include "/Plugin/RTXGI/Private/SDK/ddgi/Irradiance.ush"
 #include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
 
-#ifndef SG_LOBE_COUNT
-#define SG_LOBE_COUNT 12
-#endif
-
 // Input: ray radiance+distance atlas from probe trace pass (x=rayIndex, y=probeIndex)
 RWTexture2D<float4> DDGIVolumeRayDataUAV;
 // Output: per-probe SG amplitude atlas (x=baseLobeX+lobeIndex, y=probeY)
@@ -42,14 +38,23 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	int storageProbeIndex = probeIndex;
 #endif
 	int outY = storageProbeIndex / probeCount2D;
-	int outBaseX = (storageProbeIndex % probeCount2D) * SG_LOBE_COUNT;
+	int clampedSGLobeCount = RTXGISGClampLobeCount(SGLobeCount);
+	int outBaseX = (storageProbeIndex % probeCount2D) * clampedSGLobeCount;
+
+	// Precompute the Fibonacci SG basis axes once per thread (clamped count).
+	// RTXGISGGetAxis computes a full spiral parametrised by LobeCount, so a low
+	// N (e.g. 4) still spans the whole sphere. Computing per-ray in-loop trig in
+	// the inner loop costs ~numRays*LobeCount trig sets; this hoists to LobeCount.
+	float3 sgAxes[RTXGI_MAX_SG_LOBE_COUNT];
+	for (int ax = 0; ax < clampedSGLobeCount; ++ax)
+		sgAxes[ax] = RTXGISGGetAxis(ax, clampedSGLobeCount);
 
 	// Accumulator arrays on stack (HLSL compiles to registers)
-	float3 amplitudes[16]; // max 16 lobes
-	float weightSums[16];
+	float3 amplitudes[RTXGI_MAX_SG_LOBE_COUNT];
+	float weightSums[RTXGI_MAX_SG_LOBE_COUNT];
 
 	// Initialize with epsilon floor to avoid division-by-zero
-	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	for (int k = 0; k < clampedSGLobeCount; ++k)
 	{
 		amplitudes[k] = float3(0.0f, 0.0f, 0.0f);
 		weightSums[k] = 1e-6f;
@@ -71,11 +76,15 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 
 		// Reconstruct ray direction (same algorithm as ProbeUpdateRGS)
 		float3 rayDir = DDGIGetProbeRayDirection(rayIndex, numRays, rotation);
+		// ponytail: hoist normalize out of the SG lobe loop (was implicit in RTXGISGEvaluate)
+		float3 rayDirN = normalize(rayDir);
 
-		// Weighted projection against fixed SG basis
-		for (int k = 0; k < SG_LOBE_COUNT; ++k)
+		// Weighted projection against fixed SG basis using precomputed axes.
+		// Inline the SG evaluate: exp(sharpness * (dot - 1)) avoids per-call clamp/trig.
+		for (int k = 0; k < clampedSGLobeCount; ++k)
 		{
-			float w = RTXGISGEvaluate(rayDir, k);
+			float cosAngle = dot(rayDirN, sgAxes[k]);
+			float w = exp(RTXGI_SG_UNIFORM_SHARPNESS * (cosAngle - 1.0f));
 			amplitudes[k] += radiance * w;
 			weightSums[k] += w;
 		}
@@ -83,7 +92,7 @@ void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 
 	// Normalize and write output per lobe with temporal hysteresis
 	float hysteresis = DDGIVolume.probeHysteresis;
-	for (int k = 0; k < SG_LOBE_COUNT; ++k)
+	for (int k = 0; k < clampedSGLobeCount; ++k)
 	{
 		float3 newAmp = amplitudes[k] / weightSums[k];
 		int2 outCoord = int2(outBaseX + k, outY);
