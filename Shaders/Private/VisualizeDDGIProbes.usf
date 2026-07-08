@@ -11,11 +11,16 @@
 #include "/Engine/Public/Platform.ush"
 
 #include "/Plugin/RTXGI/Private/SDK/ddgi/ProbeCommon.ush"
+#include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
+#include "/Plugin/RTXGI/Private/SDK/SGLighting.ush"
 
 Texture2D<float4> ProbeIrradianceTexture;
 Texture2D<float4> ProbeDistanceTexture;
 Texture2D<float4> ProbeOffsets;
 Texture2D<uint> ProbeStates;
+// ponytail: SG amplitude atlas for Mode 4. Null-bound (black) when SG is disabled;
+// the PS guards Mode 4 on SGLobeCount > 0 so this is never sampled in that case.
+Texture2D<float4> ProbeSGAmplitudesTexture;
 SamplerState ProbeSampler;
 
 int Mode;
@@ -34,6 +39,7 @@ float PreExposure;
 uint ShouldUsePreExposure;
 int3 VolumeProbeScrollOffsets;
 float IrradianceScalar;
+int SGLobeCount;
 
 struct FVisualizeDDGIProbesVSToPS
 {
@@ -114,10 +120,39 @@ void VisualizeDDGIProbesPS(
         float Distance = ProbeDistanceTexture.SampleLevel(ProbeSampler, ProbeUVDistance, 0).r;
         Output = float3(Distance / DepthScale, Distance / DepthScale, Distance / DepthScale);
     }
-    else if (Mode == 3)
+else if (Mode == 3)
     {
         float Distance = ProbeDistanceTexture.SampleLevel(ProbeSampler, ProbeUVDistance, 0).g;
         Output = float3(Distance / DepthScale, Distance / DepthScale, Distance / DepthScale);
+    }
+    else if (Mode == 4 && SGLobeCount > 0)
+    {
+        // ponytail: SG reconstructed radiance debug — each probe sphere becomes a
+        // mini environment map showing the SG radiance field evaluated along the
+        // fragment's direction. This visualizes both the SG lobe directions (the
+        // Fibonacci spiral is implicit in RTXGISGGetAxis) and their amplitudes
+        // (the per-lobe color contribution). Bright spots = directions where SG
+        // thinks there's strong radiance; dark regions = directions SG under-fit.
+        //
+        // We use RTXGISGEvaluateRadiance (point evaluation, not the inner product)
+        // because the goal is to SHOW the raw SG reconstruction, not a convolved
+        // irradiance. This is the same evaluation Mode 5 uses in the deferred path.
+        int ClampedSGLobeCount = RTXGISGClampLobeCount(SGLobeCount);
+        int probeCount2D = VolumeProbeGridCounts.y * VolumeProbeGridCounts.z;
+
+        #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+            int sgProbeIndex = DDGIGetProbeIndexOffset(Input.InstanceId, VolumeProbeGridCounts, VolumeProbeScrollOffsets);
+        #else
+            int sgProbeIndex = Input.InstanceId;
+        #endif
+        int sgBase = (sgProbeIndex % probeCount2D) * ClampedSGLobeCount;
+        int sgRow = sgProbeIndex / probeCount2D;
+
+        float3 amps[RTXGI_MAX_SG_LOBE_COUNT];
+        for (int k = 0; k < ClampedSGLobeCount; ++k)
+            amps[k] = ProbeSGAmplitudesTexture[int2(sgBase + k, sgRow)].rgb;
+
+        Output = RTXGISGEvaluateRadiance(Direction, amps, ClampedSGLobeCount) / IrradianceScalar;
     }
     else
     {

@@ -85,6 +85,10 @@ struct FDDGITextureLoadContext
 	FDDGITexturePixels Distance;
 	FDDGITexturePixels Offsets;
 	FDDGITexturePixels States;
+	// ponytail: SG amplitude atlas is optional — only populated when bSGEnabled
+	// at save time and CustomVer >= SaveLoadSGAmplitudes at load time. Cleared
+	// automatically by Clear() since it reassigns *this = FDDGITextureLoadContext().
+	FDDGITexturePixels SGAmplitudes;
 
 	void Clear()
 	{

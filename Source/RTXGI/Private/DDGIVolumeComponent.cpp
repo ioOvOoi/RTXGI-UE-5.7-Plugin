@@ -1055,6 +1055,7 @@ struct RTXGI_API FDDGICustomVersion
 		SaveLoadProbeTextures,     // save pixels and width/height
 		SaveLoadProbeTexturesFmt,  // save texel format since the format can change in the project settings
 		SaveLoadProbeDataIsOptional, // Probe data is optionally stored depending on project settings
+		SaveLoadSGAmplitudes,      // save/load SG amplitude atlas alongside the four octa probe textures
 	};
 
 	// The GUID for this custom version number
@@ -1066,7 +1067,7 @@ private:
 const FGuid FDDGICustomVersion::GUID(0xc12f0537, 0x7346d9c5, 0x336fbba3, 0x738ab145);
 
 // Register the custom version with core
-FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::SaveLoadProbeDataIsOptional, TEXT("DDGIVolCompVer"));
+FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::SaveLoadSGAmplitudes, TEXT("DDGIVolCompVer"));
 
 // Create a CPU accessible GPU texture and copy the provided GPU texture's contents to it
 static bool HasRequiredTexturePixels(const FDDGITexturePixels& TexturePixels)
@@ -1279,14 +1280,23 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 
 		FDDGIVolumeSceneProxy* proxy = SceneProxy;
 
-		if (Ar.IsSaving())
+if (Ar.IsSaving())
 		{
 			// Probe data can be optionally not saved depending on project settings.
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
 			bool bProbesSerialized = bSeralizeProbesIsOptional ? GetDefault<URTXGIPluginSettings>()->SerializeProbes : true;
 			FDDGITexturePixels Irradiance, Distance, Offsets, States;
 
-			if (bProbesSerialized)
+			// ponytail: SG amplitude atlas is saved alongside the four octa probe textures when
+			// (a) the archive supports the SG section (CustomVer >= SaveLoadSGAmplitudes),
+			// (b) the volume has bSGEnabled, and
+			// (c) we actually captured non-empty pixels (RT readback succeeded or load-context passthrough).
+			// Declared outside the bProbesSerialized block so the post-texture write below can see them
+			// even when bProbesSerialized was flipped to false by a failed readback.
+			FDDGITexturePixels SGAmplitudesToSave;
+			bool bSaveSGThisVolume = false;
+
+if (bProbesSerialized)
 			{
 				//auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
 
@@ -1298,18 +1308,20 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 				{
 					// Copy textures to CPU accessible texture resources
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep1)(
-						[&Irradiance, &Distance, &Offsets, &States, proxy](FRHICommandListImmediate& RHICmdList)
+						[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, proxy](FRHICommandListImmediate& RHICmdList)
 						{
 #if ENGINE_MAJOR_VERSION < 5
 							Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetTargetableRHI());
 							Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetTargetableRHI());
 							Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetTargetableRHI() : nullptr);
 							States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetTargetableRHI() : nullptr);
+							SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
 #else
 							Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetRHI());
 							Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetRHI());
 							Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetRHI() : nullptr);
 							States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetRHI() : nullptr);
+							SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetRHI() : nullptr);
 #endif
 						}
 					);
@@ -1317,13 +1329,21 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 
 					// Read the GPU texture data to CPU memory
 					bool bReadbackSucceeded = false;
+					bool bSGReadbackSucceeded = false;
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep2)(
-						[&Irradiance, &Distance, &Offsets, &States, &bReadbackSucceeded](FRHICommandListImmediate& RHICmdList)
+						[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackSucceeded, &bSGReadbackSucceeded](FRHICommandListImmediate& RHICmdList)
 						{
 							const bool bIrradianceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance, TEXT("Irradiance"));
 							const bool bDistanceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Distance, TEXT("Distance"));
 							GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets, TEXT("Offsets"));
 							GetTexturePixelsStep2_RenderThread(RHICmdList, States, TEXT("States"));
+							// SG readback is best-effort: a null/empty atlas (bSGEnabled=false or just
+							// reallocated) yields an empty FDDGITexturePixels and we silently skip the
+							// SG section on save. Step2 returns false on empty input which we ignore.
+							if (SGAmplitudes.PendingReadback)
+							{
+								bSGReadbackSucceeded = GetTexturePixelsStep2_RenderThread(RHICmdList, SGAmplitudes, TEXT("SGAmplitudes"));
+							}
 							bReadbackSucceeded = bIrradianceReady && bDistanceReady;
 						}
 					);
@@ -1334,6 +1354,12 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 						UE_LOG(LogTemp, Error, TEXT("DDGI probe serialization skipped because required readback data was not available"));
 						bProbesSerialized = false;
 					}
+
+					// Capture the SG readback outcome for the post-texture write below.
+					// bSGEnabled is a UPROPERTY serialized by Super::Serialize, so its value here
+					// reflects the panel state at save time.
+					bSaveSGThisVolume = bSGEnabled && bSGReadbackSucceeded && HasRequiredTexturePixels(SGAmplitudes);
+					SGAmplitudesToSave = MoveTemp(SGAmplitudes);
 				}
 				else
 				{
@@ -1342,20 +1368,41 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 					Offsets = LoadContext.Offsets;
 					States = LoadContext.States;
 					bProbesSerialized = HasRequiredTexturePixels(Irradiance) && HasRequiredTexturePixels(Distance);
+
+					// ponytail: passthrough path — preserve the SG atlas captured at load time
+					// so a proxy recreated without an intervening RT update still has the SG data.
+					bSaveSGThisVolume = bSGEnabled && HasRequiredTexturePixels(LoadContext.SGAmplitudes);
+					if (bSaveSGThisVolume)
+					{
+						SGAmplitudesToSave = LoadContext.SGAmplitudes; // struct copy
+					}
 				}
 			}
 
-			if (bSeralizeProbesIsOptional)
-				Ar << bProbesSerialized;
+if (bSeralizeProbesIsOptional)
+			Ar << bProbesSerialized;
 
-			if (bProbesSerialized)
+		if (bProbesSerialized)
+		{
+			SaveFDDGITexturePixels(Ar, Irradiance, bSaveFormat);
+			SaveFDDGITexturePixels(Ar, Distance, bSaveFormat);
+			SaveFDDGITexturePixels(Ar, Offsets, bSaveFormat);
+			SaveFDDGITexturePixels(Ar, States, bSaveFormat);
+
+			// ponytail: SG amplitude section follows the four octa textures, gated by a bool flag
+			// so older archives (CustomVer < SaveLoadSGAmplitudes) and SG-disabled volumes both
+			// skip it cleanly. The CustomVer gate is checked once here; older loaders never reach
+			// this branch because they fall into the SaveLoadProbeDataIsOptional else above.
+			if (Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadSGAmplitudes)
 			{
-				SaveFDDGITexturePixels(Ar, Irradiance, bSaveFormat);
-				SaveFDDGITexturePixels(Ar, Distance, bSaveFormat);
-				SaveFDDGITexturePixels(Ar, Offsets, bSaveFormat);
-				SaveFDDGITexturePixels(Ar, States, bSaveFormat);
+				Ar << bSaveSGThisVolume;
+				if (bSaveSGThisVolume)
+				{
+					SaveFDDGITexturePixels(Ar, SGAmplitudesToSave, bSaveFormat);
+				}
 			}
 		}
+	}
 		else if (Ar.IsLoading())
 		{
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
@@ -1363,7 +1410,7 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 			if (bSeralizeProbesIsOptional)
 				Ar << bProbesSerialized;
 
-			if (bProbesSerialized)
+if (bProbesSerialized)
 			{
 				EDDGIIrradianceBits IrradianceBits = GetDefault<URTXGIPluginSettings>()->IrradianceBits;
 				EDDGIDistanceBits DistanceBits = GetDefault<URTXGIPluginSettings>()->DistanceBits;
@@ -1374,6 +1421,24 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 				LoadFDDGITexturePixels(Ar, LoadContext.Distance, (DistanceBits == EDDGIDistanceBits::n32) ? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceHighBitDepth : FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceLowBitDepth, bLoadFormat);
 				LoadFDDGITexturePixels(Ar, LoadContext.Offsets, FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatOffsets, bLoadFormat);
 				LoadFDDGITexturePixels(Ar, LoadContext.States, FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatStates, bLoadFormat);
+
+				// ponytail: SG amplitude section mirrors the save order — read the bool flag first,
+				// then the texture pixels if the flag is true. Older archives (CustomVer < SaveLoadSGAmplitudes)
+				// never reach this branch, so no SG data is consumed. bSGEnabled/SGPrecision are UPROPERTYs
+				// already loaded by Super::Serialize, so the expected format is known here. A format or
+				// dimension mismatch causes LoadFDDGITexturePixels to early-out cleanly (no half-built texture).
+				if (Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadSGAmplitudes)
+				{
+					bool bLoadSG = false;
+					Ar << bLoadSG;
+					if (bLoadSG)
+					{
+						EPixelFormat ExpectedSGFormat = (SGPrecision == 1)
+							? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth
+							: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
+						LoadFDDGITexturePixels(Ar, LoadContext.SGAmplitudes, ExpectedSGFormat, bLoadFormat);
+					}
+				}
 
 				bool& ReadyForLoad = LoadContext.ReadyForLoad;
 				ENQUEUE_RENDER_COMMAND(DDGILoadReady)(
@@ -1731,7 +1796,7 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 					{
 						ComponentLoadContext = DDGIProxy->TextureLoadContext;
 					}
-					// otherwise, we should copy the textures from this proxy into textures for the TextureLoadContext
+// otherwise, we should copy the textures from this proxy into textures for the TextureLoadContext
 					// to make them survive to the next proxy for this component if one is created.
 					else
 					{
@@ -1741,11 +1806,16 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 						ComponentLoadContext.Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesDistance->GetTargetableRHI());
 						ComponentLoadContext.Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesOffsets ? DDGIProxy->ProbesOffsets->GetTargetableRHI() : nullptr);
 						ComponentLoadContext.States = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesStates ? DDGIProxy->ProbesStates->GetTargetableRHI() : nullptr);
+						// ponytail: SG atlas saveback — null-safe like Offsets/States. If SG was disabled
+						// on this proxy the atlas is null and we capture an empty FDDGITexturePixels,
+						// which LoadVolumeTextures_RenderThread will skip via its null Texture guard.
+						ComponentLoadContext.SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesSGAmplitudes ? DDGIProxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
 #else
 						ComponentLoadContext.Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesIrradiance->GetRHI());
 						ComponentLoadContext.Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesDistance->GetRHI());
 						ComponentLoadContext.Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesOffsets ? DDGIProxy->ProbesOffsets->GetRHI() : nullptr);
 						ComponentLoadContext.States = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesStates ? DDGIProxy->ProbesStates->GetRHI() : nullptr);
+						ComponentLoadContext.SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesSGAmplitudes ? DDGIProxy->ProbesSGAmplitudes->GetRHI() : nullptr);
 #endif
 					}
 				}
