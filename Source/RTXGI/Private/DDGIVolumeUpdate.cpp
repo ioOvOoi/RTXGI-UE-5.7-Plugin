@@ -170,10 +170,22 @@ static void LoadVolumeTextures_RenderThread(FRDGBuilder& GraphBuilder, FDDGIVolu
 		AddCopyTexturePass(GraphBuilder, GraphBuilder.RegisterExternalTexture(OffsetsLoaded), GraphBuilder.RegisterExternalTexture(proxy->ProbesOffsets), FRHICopyTextureInfo{});
 	}
 
-	if (proxy->TextureLoadContext.States.Texture && proxy->ProbesStates)
+if (proxy->TextureLoadContext.States.Texture && proxy->ProbesStates)
 	{
 		TRefCountPtr<IPooledRenderTarget> StatesLoaded = CreateRenderTarget(proxy->TextureLoadContext.States.Texture.GetReference(), TEXT("DDGIStatesLoaded"));
 		AddCopyTexturePass(GraphBuilder, GraphBuilder.RegisterExternalTexture(StatesLoaded), GraphBuilder.RegisterExternalTexture(proxy->ProbesStates), FRHICopyTextureInfo{});
+	}
+
+	// ponytail: SG amplitude atlas — only copied when both the load context has a captured
+	// SG texture and the proxy actually allocated ProbesSGAmplitudes (i.e. bSGEnabled was true
+	// at ReallocateSurfaces time). A dimension mismatch (SGLobeCount changed between save and
+	// load) is tolerated by AddCopyTexturePass: it copies the intersection, leaving the
+	// remainder at the cleared-to-zero state from ReallocateSurfaces. The next SGProject pass
+	// will repopulate the full atlas, so this is a best-effort warm-start, not a hard requirement.
+	if (proxy->TextureLoadContext.SGAmplitudes.Texture && proxy->ProbesSGAmplitudes)
+	{
+		TRefCountPtr<IPooledRenderTarget> SGAmplitudesLoaded = CreateRenderTarget(proxy->TextureLoadContext.SGAmplitudes.Texture.GetReference(), TEXT("DDGISGAmplitudesLoaded"));
+		AddCopyTexturePass(GraphBuilder, GraphBuilder.RegisterExternalTexture(SGAmplitudesLoaded), GraphBuilder.RegisterExternalTexture(proxy->ProbesSGAmplitudes), FRHICopyTextureInfo{});
 	}
 
 	proxy->TextureLoadContext.Clear();
