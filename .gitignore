@@ -5,3 +5,5 @@ CLAUDE.md
 progress.md
 .logs/
 .slim/deepwork/
+.slim/worktrees/
+.slim/worktrees.json
