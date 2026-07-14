@@ -639,6 +639,151 @@ IMPLEMENT_GLOBAL_SHADER(FDDGIProbesClassify, "/Plugin/RTXGI/Private/SDK/ddgi/Pro
 
 #endif // RHI_RAYTRACING
 
+// --------------------------------------------------------------------------------------
+// BakeBlendCS — per-texel lerp compute shader for DDGI bake crossfade.
+// Does NOT require ray tracing (should compile even when RT is off).
+// States texture is copied via AddCopyTexturePass, not blended — see Phase 3 runtime logic.
+// --------------------------------------------------------------------------------------
+class FDDGIBakeBlend : public FGlobalShader
+{
+	DECLARE_GLOBAL_SHADER(FDDGIBakeBlend)
+	SHADER_USE_PARAMETER_STRUCT(FDDGIBakeBlend, FGlobalShader)
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		// Bake blend does not require ray tracing, but still needs compute shader support.
+		// Gates on feature level like the other non-RT shaders in this plugin (see DDGIVolumeVisualize.cpp).
+		return IsFeatureLevelSupported(Parameters.Platform, GMaxRHIFeatureLevel);
+	}
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(float, BlendAlpha)
+		SHADER_PARAMETER(FIntVector, TextureSize)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, CurrentBakeSRV)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, NextBakeSRV)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, LiveUAV)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FDDGIBakeBlend, "/Plugin/RTXGI/Private/SDK/ddgi/BakeBlendCS.usf", "MainCS", SF_Compute);
+
+static void DDGIBakeBlend_RenderThread(
+	FRDGBuilder& GraphBuilder,
+	FRDGTextureRef CurrentSRV,
+	FRDGTextureRef NextSRV,
+	FRDGTextureRef LiveUAV,
+	float BlendAlpha)
+{
+	// Precondition: Current, Next, and Live must share identical extents.
+	// A mismatch silently reads zero-padded data and writes partial results.
+	// Phase 3 metadata validation enforces this before dispatch.
+	check(CurrentSRV->Desc.Extent == NextSRV->Desc.Extent);
+	check(CurrentSRV->Desc.Extent == LiveUAV->Desc.Extent);
+
+	FDDGIBakeBlend::FParameters* PassParameters = GraphBuilder.AllocParameters<FDDGIBakeBlend::FParameters>();
+	PassParameters->BlendAlpha = BlendAlpha;
+	PassParameters->TextureSize = FIntVector(CurrentSRV->Desc.Extent.X, CurrentSRV->Desc.Extent.Y, 0);
+	PassParameters->CurrentBakeSRV = CurrentSRV;
+	PassParameters->NextBakeSRV = NextSRV;
+	PassParameters->LiveUAV = GraphBuilder.CreateUAV(LiveUAV);
+
+	TShaderMapRef<FDDGIBakeBlend> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+	FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(CurrentSRV->Desc.Extent, 8);
+
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("DDGIBakeBlend"),
+		ComputeShader,
+		PassParameters,
+		GroupCount
+	);
+}
+
+// --------------------------------------------------------------------------------------
+// DDGIBakeBlendPerFrame_RenderThread — per-frame crossfade advancement for bake-driven volumes.
+// Dispatches BakeBlendCS for each blendable texture, copying states.
+// Called from DDGIUpdatePerFrame_RenderThread BEFORE the RT update loop.
+// --------------------------------------------------------------------------------------
+static void DDGIBakeBlendPerFrame_RenderThread(FRDGBuilder& GraphBuilder)
+{
+	for (FDDGIVolumeSceneProxy* proxy : FDDGIVolumeSceneProxy::AllProxiesReadyForRender_RenderThread)
+	{
+		if (!proxy->bBakeBlendActive) continue;
+
+		const float BlendAlpha = FMath::Clamp(
+			(FApp::GetCurrentTime() - proxy->BakeBlendStartTime) / proxy->BakeBlendDuration,
+			0.0f, 1.0f);
+
+		// Blend 4 textures: Irradiance, Distance, Offsets, SGAmplitudes
+		{
+			// Irradiance
+			if (proxy->CurrentBakeSRVs[0] && proxy->NextBakeSRVs[0] && proxy->ProbesIrradiance)
+			{
+				TRefCountPtr<IPooledRenderTarget> CurrentPooled = CreateRenderTarget(proxy->CurrentBakeSRVs[0], TEXT("CurrentIrradiance"));
+				TRefCountPtr<IPooledRenderTarget> NextPooled    = CreateRenderTarget(proxy->NextBakeSRVs[0],    TEXT("NextIrradiance"));
+				FRDGTextureRef CurrentRDG = GraphBuilder.RegisterExternalTexture(CurrentPooled);
+				FRDGTextureRef NextRDG    = GraphBuilder.RegisterExternalTexture(NextPooled);
+				FRDGTextureRef LiveRDG    = GraphBuilder.RegisterExternalTexture(proxy->ProbesIrradiance);
+				DDGIBakeBlend_RenderThread(GraphBuilder, CurrentRDG, NextRDG, LiveRDG, BlendAlpha);
+			}
+
+			// Distance
+			if (proxy->CurrentBakeSRVs[1] && proxy->NextBakeSRVs[1] && proxy->ProbesDistance)
+			{
+				TRefCountPtr<IPooledRenderTarget> CurrentPooled = CreateRenderTarget(proxy->CurrentBakeSRVs[1], TEXT("CurrentDistance"));
+				TRefCountPtr<IPooledRenderTarget> NextPooled    = CreateRenderTarget(proxy->NextBakeSRVs[1],    TEXT("NextDistance"));
+				FRDGTextureRef CurrentRDG = GraphBuilder.RegisterExternalTexture(CurrentPooled);
+				FRDGTextureRef NextRDG    = GraphBuilder.RegisterExternalTexture(NextPooled);
+				FRDGTextureRef LiveRDG    = GraphBuilder.RegisterExternalTexture(proxy->ProbesDistance);
+				DDGIBakeBlend_RenderThread(GraphBuilder, CurrentRDG, NextRDG, LiveRDG, BlendAlpha);
+			}
+
+			// Offsets
+			if (proxy->CurrentBakeSRVs[2] && proxy->NextBakeSRVs[2] && proxy->ProbesOffsets)
+			{
+				TRefCountPtr<IPooledRenderTarget> CurrentPooled = CreateRenderTarget(proxy->CurrentBakeSRVs[2], TEXT("CurrentOffsets"));
+				TRefCountPtr<IPooledRenderTarget> NextPooled    = CreateRenderTarget(proxy->NextBakeSRVs[2],    TEXT("NextOffsets"));
+				FRDGTextureRef CurrentRDG = GraphBuilder.RegisterExternalTexture(CurrentPooled);
+				FRDGTextureRef NextRDG    = GraphBuilder.RegisterExternalTexture(NextPooled);
+				FRDGTextureRef LiveRDG    = GraphBuilder.RegisterExternalTexture(proxy->ProbesOffsets);
+				DDGIBakeBlend_RenderThread(GraphBuilder, CurrentRDG, NextRDG, LiveRDG, BlendAlpha);
+			}
+
+			// SGAmplitudes
+			if (proxy->CurrentBakeSRVs[3] && proxy->NextBakeSRVs[3] && proxy->ProbesSGAmplitudes)
+			{
+				TRefCountPtr<IPooledRenderTarget> CurrentPooled = CreateRenderTarget(proxy->CurrentBakeSRVs[3], TEXT("CurrentSGAmplitudes"));
+				TRefCountPtr<IPooledRenderTarget> NextPooled    = CreateRenderTarget(proxy->NextBakeSRVs[3],    TEXT("NextSGAmplitudes"));
+				FRDGTextureRef CurrentRDG = GraphBuilder.RegisterExternalTexture(CurrentPooled);
+				FRDGTextureRef NextRDG    = GraphBuilder.RegisterExternalTexture(NextPooled);
+				FRDGTextureRef LiveRDG    = GraphBuilder.RegisterExternalTexture(proxy->ProbesSGAmplitudes);
+				DDGIBakeBlend_RenderThread(GraphBuilder, CurrentRDG, NextRDG, LiveRDG, BlendAlpha);
+			}
+
+			// States: copy-not-blend — always use the current bake's states.
+			if (proxy->CurrentBakeStatesSRV && proxy->ProbesStates)
+			{
+				TRefCountPtr<IPooledRenderTarget> StatesPooled = CreateRenderTarget(proxy->CurrentBakeStatesSRV, TEXT("CurrentStates"));
+				FRDGTextureRef StatesRDG = GraphBuilder.RegisterExternalTexture(StatesPooled);
+				FRDGTextureRef LiveStatesRDG = GraphBuilder.RegisterExternalTexture(proxy->ProbesStates);
+				AddCopyTexturePass(GraphBuilder, StatesRDG, LiveStatesRDG, FRHICopyTextureInfo{});
+			}
+		}
+
+		// 4.5: Promote when blend completes
+		if (BlendAlpha >= 1.0f)
+		{
+			proxy->CurrentBakeSRVs[0] = proxy->NextBakeSRVs[0]; proxy->NextBakeSRVs[0].SafeRelease();
+			proxy->CurrentBakeSRVs[1] = proxy->NextBakeSRVs[1]; proxy->NextBakeSRVs[1].SafeRelease();
+			proxy->CurrentBakeSRVs[2] = proxy->NextBakeSRVs[2]; proxy->NextBakeSRVs[2].SafeRelease();
+			proxy->CurrentBakeSRVs[3] = proxy->NextBakeSRVs[3]; proxy->NextBakeSRVs[3].SafeRelease();
+			proxy->CurrentBakeStatesSRV = nullptr; // states don't change between bakes with identical geometry
+			proxy->bBakeBlendActive = false;
+		}
+	}
+}
+
 namespace DDGIVolumeUpdate
 {
 // === DEBUG FUNCTIONS (GUARANTEED TO COMPILE) ===
@@ -973,6 +1118,11 @@ void DebugShaderPlatformsDetailed()
 	{
 		check(IsInRenderingThread() || IsInParallelRenderingThread());
 
+		// 4.4 + 4.5: Advance bake crossfades before the RT update loop.
+		// Bake-driven volumes are skipped by the gather loop below (bBakeDriven gate),
+		// so their crossfade must be advanced here.
+		DDGIBakeBlendPerFrame_RenderThread(GraphBuilder);
+
 		// Gather the list of volumes to update and load data if it's available.
 		// Loading static data is the only thing that happens if ray tracing is not available.
 		TArray<FDDGIVolumeSceneProxy*> sceneVolumes;
@@ -984,8 +1134,8 @@ void DebugShaderPlatformsDetailed()
 			// Don't update the volume if it isn't part of the current scene
 			if (proxy->OwningScene != &Scene) continue;
 
-			// Don't update static runtime volumes during gameplay
-			if (View.bIsGameView && proxy->ComponentData.RuntimeStatic) continue;
+			// Don't update static runtime volumes or bake-driven volumes during gameplay
+			if (View.bIsGameView && (proxy->ComponentData.RuntimeStatic || proxy->ComponentData.bBakeDriven)) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;

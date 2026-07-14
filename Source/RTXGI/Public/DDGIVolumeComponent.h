@@ -21,6 +21,7 @@
 #include "Runtime/Launch/Resources/Version.h"
 
 #include "DDGIUtilities.h"
+#include "DDGIBakeDataAsset.h"
 
 #include "DDGIVolumeComponent.generated.h"
 
@@ -199,6 +200,7 @@ public:
 		float EmissiveMultiplier = 1.0f;
 		float LightingMultiplier = 1.0f;
 		bool RuntimeStatic = false; // If true, does not update during gameplay, only during editor.
+		bool bBakeDriven = false; // True when a bake asset drives this volume (skips RT updates, runs BakeBlendCS)
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 		bool bSGEnabled = false;
 		int32 SGLightingMode = 0;
@@ -220,6 +222,15 @@ public:
 	TRefCountPtr<IPooledRenderTarget> ProbesStates;
 	TRefCountPtr<IPooledRenderTarget> ProbesSpace;
 
+	// --- Bake crossfade textures (transient, only populated during crossfade) ---
+	// Indexed as: [0]=Irradiance, [1]=Distance, [2]=Offsets, [3]=SGAmplitudes
+	TRefCountPtr<FRHITexture> CurrentBakeSRVs[4];
+	TRefCountPtr<FRHITexture> NextBakeSRVs[4];
+	// Separate SRV for states (copied rather than blended)
+	TRefCountPtr<FRHITexture> CurrentBakeStatesSRV;
+	float BakeBlendStartTime = 0.0f;
+	float BakeBlendDuration = 0.0f;
+	bool bBakeBlendActive = false;
 
 	// Where to start the probe update from, for updating a subset of probes
 	int ProbeIndexStart = 0;
@@ -346,6 +357,10 @@ public:
 	UFUNCTION(exec)
 	void DDGIClearVolumes();
 
+	// Bake the current live probe data into a UDDGIBakeDataAsset saved to <MapName>/DDGIBakes/
+	UFUNCTION(exec)
+	void DDGIBakeCurrent(const FString& BakeName);
+
 public:
 	// --- "GI Volume" properties
 
@@ -374,6 +389,23 @@ public:
 	// If true, the volume will not update at runtime, and will keep the lighting values seen when the level is saved.
 	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Volume");
 	bool RuntimeStatic = false;
+
+	// --- Bake Assets ---
+	// Current baked data asset driving this volume (null = RT-driven or RuntimeStatic snapshot)
+	UPROPERTY(EditAnywhere, Category = "Bake Assets")
+	UDDGIBakeDataAsset* CurrentBake = nullptr;
+
+	// Next bake to crossfade to (null = no crossfade in progress)
+	UPROPERTY(Transient, DuplicateTransient)
+	UDDGIBakeDataAsset* NextBake = nullptr;
+
+	// Crossfade duration in seconds
+	UPROPERTY(Transient)
+	float BlendDuration = 2.0f;
+
+	// Elapsed blend time in seconds
+	UPROPERTY(Transient)
+	float BlendElapsed = 0.0f;
 
 	UPROPERTY(meta=(DeprecatedProperty, DeprecationMessage = "not needed from blueprints"));
 	FVector LastOrigin_DEPRECATED;
@@ -558,6 +590,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, meta = (AdvancedDisplay = "2", DevelopmentOnly), Category = "DDGI")
 	void SetProbesVisualization(bool IsProbesVisualized);
+
+	// Set the next bake asset to crossfade to over the specified duration.
+	// If called during an active crossfade, snaps to the current target first.
+	// Pass null to stop blending and keep the current state.
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	void SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float Duration);
 
 	FDDGIVolumeSceneProxy* SceneProxy;
 

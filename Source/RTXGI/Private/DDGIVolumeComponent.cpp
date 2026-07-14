@@ -31,6 +31,10 @@
 
 #include "RenderGraphUtils.h"
 
+// Baking / save package support
+#include "Misc/DateTime.h"
+#include "Misc/PackageName.h"
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(DDGIVolumeComponent)
 
 DECLARE_GPU_STAT_NAMED(RTXGI_Update, TEXT("RTXGI Update"));
@@ -1513,6 +1517,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.EmissiveMultiplier = EmissiveMultiplier;
 		ComponentData.LightingMultiplier = LightMultiplier;
 ComponentData.RuntimeStatic = RuntimeStatic;
+		ComponentData.bBakeDriven = (CurrentBake != nullptr);
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
 		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
@@ -1649,6 +1654,292 @@ ComponentData.RuntimeStatic = RuntimeStatic;
 	}
 }
 
+// ------------------------------------------------------------------------------
+// Bake metadata validation helpers
+// ------------------------------------------------------------------------------
+static bool ValidateBakeMetadata(const UDDGIBakeDataAsset* Bake, const UDDGIVolumeComponent* Comp, const FDDGIVolumeSceneProxy::FComponentData& VolumeConfig, FString& OutError)
+{
+	if (Bake->ProbeCounts != Comp->ProbeCounts)
+	{
+		OutError = FString::Printf(TEXT("Bake probe counts mismatch (bake=%dx%dx%d, volume=%dx%dx%d)"),
+			Bake->ProbeCounts.X, Bake->ProbeCounts.Y, Bake->ProbeCounts.Z,
+			Comp->ProbeCounts.X, Comp->ProbeCounts.Y, Comp->ProbeCounts.Z);
+		return false;
+	}
+	if (Bake->bEnableProbeRelocation != Comp->ProbeRelocation.AutomaticProbeRelocation)
+	{
+		OutError = TEXT("Bake relocation flag mismatch");
+		return false;
+	}
+	if (Bake->bEnableProbeScrolling)
+	{
+		OutError = TEXT("Bake was captured with scrolling enabled — incompatible");
+		return false;
+	}
+
+	// Validate RaysPerProbe — mismatch causes extent mismatch on Distance texture → check() crash in BakeBlendCS
+	if (Bake->RaysPerProbe != (int32)Comp->RaysPerProbe)
+	{
+		OutError = FString::Printf(TEXT("Bake rays-per-probe mismatch (bake=%d, volume=%d)"),
+			Bake->RaysPerProbe, (int32)Comp->RaysPerProbe);
+		return false;
+	}
+
+	// Validate SGLobeCount when SG is enabled — mismatch causes extent mismatch on SGAmplitudes texture
+	if (VolumeConfig.bSGEnabled && Bake->SGLobeCount != VolumeConfig.SGLobeCount)
+	{
+		OutError = FString::Printf(TEXT("Bake SG lobe count mismatch (bake=%d, volume=%d)"),
+			Bake->SGLobeCount, VolumeConfig.SGLobeCount);
+		return false;
+	}
+
+	// Validate pixel formats for textures that have data
+	auto CheckFormat = [&](const FDDGIBakeTexturePayload& Payload, EPixelFormat ExpectedFormat, const TCHAR* Name) -> bool
+	{
+		if (Payload.Desc.Width > 0 && Payload.Desc.PixelFormat != (uint32)ExpectedFormat)
+		{
+			OutError = FString::Printf(TEXT("%s pixel format mismatch (bake=%d, expected=%d)"), Name, Payload.Desc.PixelFormat, (uint32)ExpectedFormat);
+			return false;
+		}
+		return true;
+	};
+
+	EDDGIIrradianceBits IrradianceBits = GetDefault<URTXGIPluginSettings>()->IrradianceBits;
+	EDDGIDistanceBits DistanceBits = GetDefault<URTXGIPluginSettings>()->DistanceBits;
+
+	EPixelFormat ExpectedIrradianceFmt = (IrradianceBits == EDDGIIrradianceBits::n32)
+		? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatIrradianceHighBitDepth
+		: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatIrradianceLowBitDepth;
+	EPixelFormat ExpectedDistanceFmt = (DistanceBits == EDDGIDistanceBits::n32)
+		? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceHighBitDepth
+		: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceLowBitDepth;
+	EPixelFormat ExpectedSGAmplFmt = (Comp->SGPrecision == 1)
+		? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth
+		: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
+
+	if (!CheckFormat(Bake->Irradiance, ExpectedIrradianceFmt, TEXT("Irradiance"))) return false;
+	if (!CheckFormat(Bake->Distance,   ExpectedDistanceFmt,   TEXT("Distance")))   return false;
+	if (!CheckFormat(Bake->Offsets,    FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatOffsets, TEXT("Offsets"))) return false;
+	if (!CheckFormat(Bake->States,     FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatStates,  TEXT("States")))  return false;
+	if (!CheckFormat(Bake->SGAmplitudes, ExpectedSGAmplFmt,   TEXT("SGAmplitudes"))) return false;
+
+	return true;
+}
+
+// ponytail: creates a staging FRHITexture2D from FDDGITexturePixels pixel data on the render thread.
+// Used by SetNextBake for both initial bake load and crossfade texture upload.
+static void CreateRHITextureFromBakePixels_RenderThread(FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& Pixels, EPixelFormat Format)
+{
+	if (Pixels.Desc.Width == 0 || Pixels.Desc.Height == 0 || Pixels.Pixels.Num() == 0)
+		return;
+
+	FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(
+		TEXT("DDGIBakeTexture"), Pixels.Desc.Width, Pixels.Desc.Height, Format);
+	CreateInfo.AddFlags(TexCreate_ShaderResource);
+	Pixels.Texture = RHICreateTexture(CreateInfo);
+
+	uint32 DestStride;
+	uint8* Data = (uint8*)RHICmdList.LockTexture2D(Pixels.Texture, 0, RLM_WriteOnly, DestStride, false);
+	if (Pixels.Desc.Stride == DestStride)
+	{
+		FMemory::Memcpy(Data, Pixels.Pixels.GetData(), Pixels.Desc.Height * Pixels.Desc.Stride);
+	}
+	else
+	{
+		const uint8* Src = Pixels.Pixels.GetData();
+		for (uint32 Row = 0; Row < Pixels.Desc.Height; ++Row)
+		{
+			FMemory::Memcpy(Data, Src, FMath::Min(Pixels.Desc.Stride, DestStride));
+			Data += DestStride;
+			Src += Pixels.Desc.Stride;
+		}
+	}
+	RHICmdList.UnlockTexture2D(Pixels.Texture, 0, false);
+
+#if !WITH_EDITOR
+	Pixels.Pixels.Reset();
+#endif
+}
+
+void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float Duration)
+{
+	// 5.4: Reject scrolling volumes
+	if (ScrollProbesInfinitely)
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("SetNextBake: scrolling volumes do not support bakes"));
+		return;
+	}
+
+	// Null = stop blending
+	if (NextBakeAsset == nullptr)
+	{
+		NextBake = nullptr;
+		BlendElapsed = 0.0f;
+		// Cancel any active proxy-level crossfade so the blend pass stops dispatching
+		if (FDDGIVolumeSceneProxy* Proxy = SceneProxy)
+		{
+			ENQUEUE_RENDER_COMMAND(DDGICancelBakeBlend)(
+				[Proxy](FRHICommandListImmediate&)
+				{
+					for (int32 i = 0; i < 4; ++i) { Proxy->NextBakeSRVs[i].SafeRelease(); }
+					Proxy->bBakeBlendActive = false;
+				}
+			);
+		}
+		MarkRenderDynamicDataDirty();
+		return;
+	}
+
+	// 5.2: Validate metadata — build a temporary config from current component state
+	EDDGIIrradianceBits IrradianceBits = GetDefault<URTXGIPluginSettings>()->IrradianceBits;
+	EDDGIDistanceBits DistanceBits = GetDefault<URTXGIPluginSettings>()->DistanceBits;
+
+	FDDGIVolumeSceneProxy::FComponentData VolumeConfig;
+	VolumeConfig.ProbeCounts = ProbeCounts;
+	VolumeConfig.EnableProbeRelocation = ProbeRelocation.AutomaticProbeRelocation;
+	VolumeConfig.RaysPerProbe = RaysPerProbe;
+	VolumeConfig.bSGEnabled = bSGEnabled || CVarSGEnable.GetValueOnGameThread();
+	// SGLobeCount must match the clamped CVar-aware logic used in UpdateRenderThreadData (line 1528)
+	// and DDGIBakeCurrent (line 2102), or bake→validate round-trips break under CVar overrides.
+	const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
+	VolumeConfig.SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : SGLobeCount, 4, 32);
+
+	FString ValidationError;
+	if (!ValidateBakeMetadata(NextBakeAsset, this, VolumeConfig, ValidationError))
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGI Bake rejected: %s"), *ValidationError);
+		return;
+	}
+
+	// 4.3 + oracle snap: If there's an active crossfade, snap-complete it first
+	if (NextBake != nullptr)
+	{
+		CurrentBake = NextBake;  // Promote in-progress blend target to current
+	}
+
+	// Set new NextBake
+	NextBake = NextBakeAsset;
+	BlendDuration = FMath::Max(0.001f, Duration);
+	BlendElapsed = 0.0f;
+
+	if (CurrentBake == nullptr)
+	{
+		// Initial bake application — no crossfade. Reuse the existing LoadVolumeTextures_RenderThread
+		// path by populating LoadContext from the bake asset.
+		CurrentBake = NextBake;
+		NextBake = nullptr;
+
+		UDDGIBakeDataAsset* Bake = CurrentBake;
+
+		// Convert payloads to FDDGITexturePixels (copies desc + pixels)
+		Bake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
+		Bake->Distance.ToTexturePixels(LoadContext.Distance);
+		Bake->Offsets.ToTexturePixels(LoadContext.Offsets);
+		Bake->States.ToTexturePixels(LoadContext.States);
+		if (Bake->SGAmplitudes.Desc.Width > 0)
+		{
+			Bake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
+		}
+
+		// Create RHI textures from pixel data on the render thread.
+		// ReadyForLoad is set INSIDE the render command (after texture creation) to avoid a race
+		// where the game thread copies LoadContext (in UpdateRenderThreadData) before the RHI
+		// textures exist — that would capture ReadyForLoad=true with null Texture handles.
+		FDDGITextureLoadContext& Ctx = LoadContext;
+		ENQUEUE_RENDER_COMMAND(DDGILoadBakeTextures)(
+			[&Ctx](FRHICommandListImmediate& RHICmdList)
+			{
+				EPixelFormat IrradianceFmt = (EPixelFormat)Ctx.Irradiance.Desc.PixelFormat;
+				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Irradiance, IrradianceFmt);
+				EPixelFormat DistanceFmt = (EPixelFormat)Ctx.Distance.Desc.PixelFormat;
+				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Distance, DistanceFmt);
+				EPixelFormat OffsetsFmt = (EPixelFormat)Ctx.Offsets.Desc.PixelFormat;
+				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Offsets, OffsetsFmt);
+				EPixelFormat StatesFmt = (EPixelFormat)Ctx.States.Desc.PixelFormat;
+				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.States, StatesFmt);
+				if (Ctx.SGAmplitudes.Desc.Width > 0)
+				{
+					EPixelFormat SGFmt = (EPixelFormat)Ctx.SGAmplitudes.Desc.PixelFormat;
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.SGAmplitudes, SGFmt);
+				}
+				// Set ReadyForLoad HERE (render thread, after textures exist) to prevent
+				// the game-thread copy in UpdateRenderThreadData from capturing a half-built context.
+				Ctx.ReadyForLoad = true;
+			}
+		);
+	}
+	else
+	{
+		// Crossfade: CurrentBake != null && NextBake != null.
+		// Requires a live proxy to hold persistent SRVs during the blend.
+		if (!SceneProxy)
+		{
+			UE_LOG(LogRTXGI, Warning, TEXT("SetNextBake: cannot crossfade — volume has no render proxy"));
+			NextBake = nullptr;
+			return;
+		}
+
+		// Create SRV textures for both on the proxy and activate BakeBlendCS.
+		FDDGIBakeDataAsset* Current = CurrentBake;
+		FDDGIBakeDataAsset* Next = NextBake;
+		FDDGIVolumeSceneProxy* Proxy = SceneProxy;
+
+		// Convert bake payloads to pixel data for the render thread command
+		FDDGITexturePixels CurrentTex[4]; // [0]=Irradiance, [1]=Distance, [2]=Offsets, [3]=SGAmplitudes
+		FDDGITexturePixels NextTex[4];
+		FDDGITexturePixels CurrentStates;
+
+		if (Current->Irradiance.Desc.Width > 0)  Current->Irradiance.ToTexturePixels(CurrentTex[0]);
+		if (Current->Distance.Desc.Width > 0)    Current->Distance.ToTexturePixels(CurrentTex[1]);
+		if (Current->Offsets.Desc.Width > 0)     Current->Offsets.ToTexturePixels(CurrentTex[2]);
+		if (Current->SGAmplitudes.Desc.Width > 0) Current->SGAmplitudes.ToTexturePixels(CurrentTex[3]);
+		if (Current->States.Desc.Width > 0)       Current->States.ToTexturePixels(CurrentStates);
+
+		if (Next->Irradiance.Desc.Width > 0)  Next->Irradiance.ToTexturePixels(NextTex[0]);
+		if (Next->Distance.Desc.Width > 0)    Next->Distance.ToTexturePixels(NextTex[1]);
+		if (Next->Offsets.Desc.Width > 0)     Next->Offsets.ToTexturePixels(NextTex[2]);
+		if (Next->SGAmplitudes.Desc.Width > 0) Next->SGAmplitudes.ToTexturePixels(NextTex[3]);
+
+		const float StartTime = FApp::GetCurrentTime();
+		const float BlendDur = BlendDuration;
+
+		ENQUEUE_RENDER_COMMAND(DDGISetupBakeCrossfade)(
+			[Proxy, CurrentTex, NextTex, CurrentStates, StartTime, BlendDur](FRHICommandListImmediate& RHICmdList) mutable
+			{
+				// ponytail: reuse CreateRHITextureFromBakePixels_RenderThread instead of
+				// duplicating the Lock/Memcpy/Unlock upload pattern inline.
+				auto CreateSRV = [&RHICmdList](FDDGITexturePixels& Pixels) -> TRefCountPtr<FRHITexture>
+				{
+					if (Pixels.Desc.Width == 0 || Pixels.Pixels.Num() == 0)
+						return nullptr;
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Pixels, (EPixelFormat)Pixels.Desc.PixelFormat);
+					return Pixels.Texture;
+				};
+
+			// Current bake SRVs (persistent across blend duration)
+			Proxy->CurrentBakeSRVs[0] = CreateSRV(CurrentTex[0]);
+			Proxy->CurrentBakeSRVs[1] = CreateSRV(CurrentTex[1]);
+			Proxy->CurrentBakeSRVs[2] = CreateSRV(CurrentTex[2]);
+			Proxy->CurrentBakeSRVs[3] = CreateSRV(CurrentTex[3]);
+			Proxy->CurrentBakeStatesSRV = CreateSRV(CurrentStates);
+
+			// Next bake SRVs
+			Proxy->NextBakeSRVs[0] = CreateSRV(NextTex[0]);
+			Proxy->NextBakeSRVs[1] = CreateSRV(NextTex[1]);
+			Proxy->NextBakeSRVs[2] = CreateSRV(NextTex[2]);
+			Proxy->NextBakeSRVs[3] = CreateSRV(NextTex[3]);
+
+				// Activate crossfade
+				Proxy->BakeBlendStartTime = StartTime;
+				Proxy->BakeBlendDuration = BlendDur;
+				Proxy->bBakeBlendActive = true;
+			}
+		);
+	}
+
+	MarkRenderDynamicDataDirty();
+}
+
 void UDDGIVolumeComponent::EnableVolumeComponent(bool enabled)
 {
 	EnableVolume = enabled;
@@ -1732,6 +2023,133 @@ void UDDGIVolumeComponent::DDGIClearVolumes()
 			GraphBuilder.Execute();
 		}
 	);
+#endif
+}
+
+void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
+{
+#if WITH_RTXGI
+	// 6.5: Refuse bake on scrolling volumes
+	if (ScrollProbesInfinitely)
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: scrolling volumes do not support bakes"));
+		return;
+	}
+
+	FDDGIVolumeSceneProxy* proxy = SceneProxy;
+	if (!proxy)
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: no scene proxy"));
+		return;
+	}
+
+	if (BakeName.IsEmpty())
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: BakeName is empty"));
+		return;
+	}
+
+	// Read back all 5 live GPU textures — mirrors the Serialize() readback pattern
+	FDDGITexturePixels Irradiance, Distance, Offsets, States, SGAmplitudes;
+
+	ENQUEUE_RENDER_COMMAND(DDGIBakeStep1)(
+		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, proxy](FRHICommandListImmediate& RHICmdList)
+		{
+#if ENGINE_MAJOR_VERSION < 5
+			Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetTargetableRHI());
+			Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetTargetableRHI());
+			Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetTargetableRHI() : nullptr);
+			States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetTargetableRHI() : nullptr);
+			SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
+#else
+			Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetRHI());
+			Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetRHI());
+			Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetRHI() : nullptr);
+			States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetRHI() : nullptr);
+			SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetRHI() : nullptr);
+#endif
+		}
+	);
+	FlushRenderingCommands();
+
+	// Step 2: read the GPU texture data to CPU memory
+	// Gate on both Irradiance AND Distance — Distance drives the radiance atlas extent;
+	// a failed Distance readback produces garbage that crashes BakeBlendCS (check() on extent mismatch).
+	bool bReadbackOk = false;
+	ENQUEUE_RENDER_COMMAND(DDGIBakeStep2)(
+		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackOk](FRHICommandListImmediate& RHICmdList)
+		{
+			const bool bIrrOK = GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance, TEXT("BakeIrradiance"));
+			const bool bDistOK = GetTexturePixelsStep2_RenderThread(RHICmdList, Distance, TEXT("BakeDistance"));
+			GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets, TEXT("BakeOffsets"));
+			GetTexturePixelsStep2_RenderThread(RHICmdList, States, TEXT("BakeStates"));
+			GetTexturePixelsStep2_RenderThread(RHICmdList, SGAmplitudes, TEXT("BakeSGAmplitudes"));
+			bReadbackOk = bIrrOK && bDistOK;
+		}
+	);
+	FlushRenderingCommands();
+
+	if (!bReadbackOk)
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: irradiance readback failed — bake aborted"));
+		return;
+	}
+
+	// 6.3: Assemble the bake asset
+	UDDGIBakeDataAsset* BakeAsset = NewObject<UDDGIBakeDataAsset>();
+	BakeAsset->BakeName = BakeName;
+	BakeAsset->ProbeCounts = ProbeCounts;
+	BakeAsset->RaysPerProbe = (int32)GetNumRaysPerProbe(RaysPerProbe);
+	BakeAsset->bEnableProbeRelocation = ProbeRelocation.AutomaticProbeRelocation;
+	BakeAsset->bEnableProbeScrolling = ScrollProbesInfinitely;
+
+	// SG metadata — matches the CVar logic in UpdateRenderThreadData
+	const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
+	const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
+	BakeAsset->SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : (int32)SGLobeCount, 4, 32);
+
+	// Convert FDDGITexturePixels → FDDGIBakeTexturePayload via FromTexturePixels
+	BakeAsset->Irradiance.FromTexturePixels(Irradiance);
+	BakeAsset->Distance.FromTexturePixels(Distance);
+	BakeAsset->Offsets.FromTexturePixels(Offsets);
+	BakeAsset->States.FromTexturePixels(States);
+	if (SGAmplitudes.Desc.Width > 0)
+	{
+		BakeAsset->SGAmplitudes.FromTexturePixels(SGAmplitudes);
+	}
+
+	// 6.4: Save the asset to <MapName>/DDGIBakes/
+	UWorld* World = GetWorld();
+	FString MapName = World ? World->GetMapName() : TEXT("Unknown");
+	FString CleanMapName = FPaths::GetCleanFilename(MapName);
+	FString BakeDir = FString::Printf(TEXT("/Game/Maps/%s/DDGIBakes"), *CleanMapName);
+
+	FString AssetName = FString::Printf(TEXT("Bake_%s_%s"), *BakeName, *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+	FString PackagePath = FString::Printf(TEXT("%s/%s"), *BakeDir, *AssetName);
+
+	UPackage* Package = CreatePackage(*PackagePath);
+	if (!Package)
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: failed to create package %s"), *PackagePath);
+		return;
+	}
+
+	BakeAsset->Rename(*AssetName, Package, REN_None);
+	BakeAsset->SetFlags(RF_Public | RF_Standalone);
+
+	FString Filename = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
+	bool bSaved = UPackage::SavePackage(Package, BakeAsset, RF_Public | RF_Standalone, *Filename);
+
+	if (bSaved)
+	{
+		UE_LOG(LogRTXGI, Log, TEXT("DDGIBakeCurrent: bake '%s' saved to %s"), *BakeName, *PackagePath);
+	}
+	else
+	{
+		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: failed to save bake '%s'"), *BakeName);
+	}
+#else
+	UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: RTXGI not available"));
 #endif
 }
 
