@@ -27,12 +27,12 @@ Texture2D<float4> CurrentBakeSRV;
 Texture2D<float4> NextBakeSRV;
 RWTexture2D<float4> LiveUAV;
 float BlendAlpha;
-int2 TextureSize;
+int3 TextureSize;
 
 [numthreads(8, 8, 1)]
 void MainCS(uint3 DTid : SV_DispatchThreadID)
 {
-	if (any(DTid.xy >= TextureSize))
+	if (any(DTid.xy >= TextureSize.xy))
 		return;
 
 	LiveUAV[DTid.xy] = lerp(CurrentBakeSRV[DTid.xy], NextBakeSRV[DTid.xy], BlendAlpha);

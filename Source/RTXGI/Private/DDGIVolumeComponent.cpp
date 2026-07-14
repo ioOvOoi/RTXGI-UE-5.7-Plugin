@@ -34,6 +34,7 @@
 // Baking / save package support
 #include "Misc/DateTime.h"
 #include "Misc/PackageName.h"
+#include "UObject/SavePackage.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(DDGIVolumeComponent)
 
@@ -1289,7 +1290,7 @@ if (Ar.IsSaving())
 			// Probe data can be optionally not saved depending on project settings.
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
 			bool bProbesSerialized = bSeralizeProbesIsOptional ? GetDefault<URTXGIPluginSettings>()->SerializeProbes : true;
-			FDDGITexturePixels Irradiance, Distance, Offsets, States;
+			FDDGITexturePixels Irradiance, Distance, Offsets, States, SGAmplitudes;
 
 			// ponytail: SG amplitude atlas is saved alongside the four octa probe textures when
 			// (a) the archive supports the SG section (CustomVer >= SaveLoadSGAmplitudes),
@@ -1766,7 +1767,7 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 	// 5.4: Reject scrolling volumes
 	if (ScrollProbesInfinitely)
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("SetNextBake: scrolling volumes do not support bakes"));
+		UE_LOG(LogTemp, Warning, TEXT("SetNextBake: scrolling volumes do not support bakes"));
 		return;
 	}
 
@@ -1807,7 +1808,7 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 	FString ValidationError;
 	if (!ValidateBakeMetadata(NextBakeAsset, this, VolumeConfig, ValidationError))
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGI Bake rejected: %s"), *ValidationError);
+		UE_LOG(LogTemp, Warning, TEXT("DDGI Bake rejected: %s"), *ValidationError);
 		return;
 	}
 
@@ -1874,14 +1875,14 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 		// Requires a live proxy to hold persistent SRVs during the blend.
 		if (!SceneProxy)
 		{
-			UE_LOG(LogRTXGI, Warning, TEXT("SetNextBake: cannot crossfade — volume has no render proxy"));
+			UE_LOG(LogTemp, Warning, TEXT("SetNextBake: cannot crossfade — volume has no render proxy"));
 			NextBake = nullptr;
 			return;
 		}
 
 		// Create SRV textures for both on the proxy and activate BakeBlendCS.
-		FDDGIBakeDataAsset* Current = CurrentBake;
-		FDDGIBakeDataAsset* Next = NextBake;
+		UDDGIBakeDataAsset* Current = CurrentBake;
+		UDDGIBakeDataAsset* Next = NextBake;
 		FDDGIVolumeSceneProxy* Proxy = SceneProxy;
 
 		// Convert bake payloads to pixel data for the render thread command
@@ -2032,20 +2033,20 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	// 6.5: Refuse bake on scrolling volumes
 	if (ScrollProbesInfinitely)
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: scrolling volumes do not support bakes"));
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: scrolling volumes do not support bakes"));
 		return;
 	}
 
 	FDDGIVolumeSceneProxy* proxy = SceneProxy;
 	if (!proxy)
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: no scene proxy"));
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: no scene proxy"));
 		return;
 	}
 
 	if (BakeName.IsEmpty())
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: BakeName is empty"));
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: BakeName is empty"));
 		return;
 	}
 
@@ -2091,7 +2092,7 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 
 	if (!bReadbackOk)
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: irradiance readback failed — bake aborted"));
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: irradiance readback failed — bake aborted"));
 		return;
 	}
 
@@ -2130,7 +2131,7 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	UPackage* Package = CreatePackage(*PackagePath);
 	if (!Package)
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: failed to create package %s"), *PackagePath);
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: failed to create package %s"), *PackagePath);
 		return;
 	}
 
@@ -2138,18 +2139,21 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	BakeAsset->SetFlags(RF_Public | RF_Standalone);
 
 	FString Filename = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
-	bool bSaved = UPackage::SavePackage(Package, BakeAsset, RF_Public | RF_Standalone, *Filename);
+	// UE 5.7: use FSavePackageArgs overload (the bool(Package, Asset, Flags, Filename) overload is removed)
+	FSavePackageArgs SaveArgs;
+	SaveArgs.SaveFlags = RF_Public | RF_Standalone;
+	bool bSaved = UPackage::SavePackage(Package, BakeAsset, *Filename, SaveArgs);
 
 	if (bSaved)
 	{
-		UE_LOG(LogRTXGI, Log, TEXT("DDGIBakeCurrent: bake '%s' saved to %s"), *BakeName, *PackagePath);
+		UE_LOG(LogTemp, Log, TEXT("DDGIBakeCurrent: bake '%s' saved to %s"), *BakeName, *PackagePath);
 	}
 	else
 	{
-		UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: failed to save bake '%s'"), *BakeName);
+		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: failed to save bake '%s'"), *BakeName);
 	}
 #else
-	UE_LOG(LogRTXGI, Warning, TEXT("DDGIBakeCurrent: RTXGI not available"));
+	UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: RTXGI not available"));
 #endif
 }
 
