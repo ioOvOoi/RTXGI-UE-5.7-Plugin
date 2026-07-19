@@ -34,6 +34,9 @@ float4              ScaledViewSizeAndInvSize;
 int2                ScaledViewOffset;
 uint                ShouldUsePreExposure;
 uint                NumVolumes;
+int                 SkyVisibilityEnable;
+float               SkyVisibilityIntensity;
+float               ChebyshevFloor;
 
 // generate an array of structures for each probe volume
 #define VOLUME_ENTRY(x) \
@@ -182,7 +185,7 @@ Texture2D<uint> ProbeStates,
                     chebWeight = variance / (variance + v * v);
                     chebWeight = max(chebWeight * chebWeight * chebWeight, 0);
                 }
-                weight *= max(0.05f, chebWeight);
+                weight *= max(ChebyshevFloor, chebWeight);
                 if(weight < 0.2f) weight *= weight * weight * 25; // crush tiny weights
                 weight = max(weight, 0.000001f);
 
@@ -234,7 +237,7 @@ if(SGLightingMode == 1)
                 Resources.probeStatesSRV = ProbeStates;
             #endif
                 float3 SurfaceBias = DDGIGetSurfaceBias(Normal, CameraDirection, Volume);
-                float3 OctaIrradiance = DDGIGetVolumeIrradiance(WorldPosition, SurfaceBias, Normal, Volume, Resources);
+                float3 OctaIrradiance = DDGIGetVolumeIrradiance(WorldPosition, SurfaceBias, Normal, Volume, Resources, ChebyshevFloor);
                 float3 OctaDiffuse = OctaIrradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
                 LightWeight.rgb = abs(SGDiffuse - OctaDiffuse) * 4.0f;
             }
@@ -282,7 +285,8 @@ else
                 SurfaceBias,
                 Normal,
                 Volume,
-                Resources
+                Resources,
+                ChebyshevFloor
             );
 
             LightWeight.rgb = Irradiance * (Albedo / RTXGI_PI) / IrradianceScalar;
@@ -419,6 +423,14 @@ DDGIVolume_##x##_SGLobeCount, \
     #undef VOLUME_ENTRY
 
     float PreExposure = ShouldUsePreExposure ? View.PreExposure : 1.0f;
+
+    // Reader: global intensity only. Writer (ViewExtension) owns per-volume intensity via GBufferC.a.
+    // BaseColorTexture is GBufferC — .a is GBufferAO when Allow Static Lighting is Off.
+    if (SkyVisibilityEnable != 0)
+    {
+        float gBufferAO = BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).a;
+        AccLightWeight.rgb *= lerp(1.0f, gBufferAO, SkyVisibilityIntensity);
+    }
 
     LightingPassUAV[PixelIndex] += float4(AccLightWeight.rgb * AccLightWeight.a * PreExposure, 0.f);
 }

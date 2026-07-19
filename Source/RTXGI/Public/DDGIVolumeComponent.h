@@ -210,6 +210,7 @@ public:
 		bool bSGSpecularEnabled = true;
 		float SGHysteresis = 0.95f;
 		float SGSpecularMinRoughness = -1.0f;
+		float SkyVisibilityIntensity = 1.0f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
@@ -526,6 +527,12 @@ public:
 	// SG specular roughness override. -1 uses material roughness from GBuffer; 0..1 forces a debug roughness value.
 	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
 	float SGSpecularMinRoughness = -1.0f;
+
+	// --- "Sky Visibility Occlusion" properties
+
+	// Per-volume sky visibility intensity. 0=no large-scale occlusion, 1=full. Multiplied with global r.RTXGI.DDGI.SkyVisibility.Intensity. Useful to weaken distant volumes.
+	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
+	float SkyVisibilityIntensity = 1.0f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
