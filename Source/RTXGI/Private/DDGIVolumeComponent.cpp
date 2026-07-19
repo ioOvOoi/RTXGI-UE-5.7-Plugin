@@ -49,6 +49,37 @@ static TAutoConsoleVariable<bool> CVarUseDDGI(
 	TEXT("If false, this will disable the lighting contribution and functionality of DDGI volumes.\n"),
 	ECVF_RenderThreadSafe);
 
+// ponytail: Sky visibility from probe distance — large-scale occlusion replacing DFAO
+static TAutoConsoleVariable<bool> CVarSkyVisibility(
+	TEXT("r.RTXGI.DDGI.SkyVisibility"),
+	true,
+	TEXT("Enable sky visibility from probe distance texture. Modulates indirect light and writes GBufferAO for SkyLight pass. Replaces DFAO for large-scale occlusion without SDF voxel noise.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilityIntensity(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.Intensity"),
+	1.0f,
+	TEXT("Global sky visibility intensity. 0 = no darkening, 1 = full. Multiplied with per-volume intensity.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilityResolutionScale(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.ResolutionScale"),
+	0.5f,
+	TEXT("Resolution scale for the sky visibility GBufferAO compute pass. 0.25=coarse/cheap, 0.5=default, 1.0=full res. Low-frequency signal, 0.5 is usually enough.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarSkyVisibilitySampleCount(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.SampleCount"),
+	8,
+	TEXT("Number of hemisphere directions sampled per pixel for sky visibility. 1=normal only (inaccurate on walls), 4/8/16=hemisphere integration. 8 is default.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarChebyshevFloor(
+	TEXT("r.RTXGI.DDGI.ChebyshevFloor"),
+	0.5f,
+	TEXT("Chebyshev visibility weight floor. 0.05=original (strong occlusion, light leak protection), 0.5=default (weakened, lets sky visibility take over large-scale occlusion), 0.8=minimal. Probe update path always uses 0.05.\n"),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<float> CVarLightingPassScale(
 	TEXT("r.RTXGI.DDGI.LightingPass.Scale"),
 	1.0f,
@@ -145,7 +176,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
 	SHADER_PARAMETER(float, BlendDistanceBlack)
 	SHADER_PARAMETER(float, ApplyLighting)
 	SHADER_PARAMETER(float, IrradianceScalar)
-// SG metadata per volume (no SRV cost)
+	// SG metadata per volume (no SRV cost)
 	SHADER_PARAMETER(int, SGLobeCount)
 	SHADER_PARAMETER(int, SGLightingMode)
 	SHADER_PARAMETER(float, SGSpecularRoughness)
@@ -167,6 +198,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(FIntPoint, ScaledViewOffset)
 	SHADER_PARAMETER(int32, ShouldUsePreExposure)
 	SHADER_PARAMETER(int32, NumVolumes)
+	SHADER_PARAMETER(int32, SkyVisibilityEnable)
+	SHADER_PARAMETER(float, SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, ChebyshevFloor)
 	// Global SG amplitude texture (single slot, avoids per-volume SRV overflow)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeSGTexture)
 	// Volumes are sorted from densest probes to least dense probes
@@ -813,6 +847,9 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
+			PassParameters->SkyVisibilityEnable = CVarSkyVisibility.GetValueOnRenderThread() ? 1 : 0;
+			PassParameters->SkyVisibilityIntensity = CVarSkyVisibilityIntensity.GetValueOnRenderThread();
+			PassParameters->ChebyshevFloor = CVarChebyshevFloor.GetValueOnRenderThread();
 			PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -870,18 +907,18 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				// Apply the lighting multiplier to artificially lighten or darken the indirect light from the volume
 				PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
 
-// SG lighting parameters
-			PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
-			PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
-			PassParameters->DDGIVolume[volumeIndex].bSGDiffuseEnabled = volumeProxy->ComponentData.bSGDiffuseEnabled ? 1 : 0;
-			PassParameters->DDGIVolume[volumeIndex].bSGSpecularEnabled = volumeProxy->ComponentData.bSGSpecularEnabled ? 1 : 0;
-			// CVar lighting mode override. -1 means use the Volume panel value.
-			{
-				static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
-				const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
-				PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
-					(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
-			}
+				// SG lighting parameters
+				PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
+				PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
+				PassParameters->DDGIVolume[volumeIndex].bSGDiffuseEnabled = volumeProxy->ComponentData.bSGDiffuseEnabled ? 1 : 0;
+				PassParameters->DDGIVolume[volumeIndex].bSGSpecularEnabled = volumeProxy->ComponentData.bSGSpecularEnabled ? 1 : 0;
+				// CVar lighting mode override. -1 means use the Volume panel value.
+				{
+					static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
+					const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
+					PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
+						(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
+				}
 
 				// Bind global SG amplitude texture (last SG volume wins, fine for single-volume case)
 				if (volumeProxy->ProbesSGAmplitudes)
@@ -1517,7 +1554,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.IrradianceScalar = IrradianceScalar;
 		ComponentData.EmissiveMultiplier = EmissiveMultiplier;
 		ComponentData.LightingMultiplier = LightMultiplier;
-ComponentData.RuntimeStatic = RuntimeStatic;
+		ComponentData.RuntimeStatic = RuntimeStatic;
 		ComponentData.bBakeDriven = (CurrentBake != nullptr);
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
@@ -1532,6 +1569,7 @@ ComponentData.RuntimeStatic = RuntimeStatic;
 		ComponentData.bSGSpecularEnabled = bSGSpecularEnabled && CVarSGSpecular.GetValueOnGameThread();
 		ComponentData.SGHysteresis = FMath::Clamp(bGlobalSGEnabled ? CVarSGHysteresis.GetValueOnGameThread() : SGHysteresis, 0.0f, 1.0f);
 		ComponentData.SGSpecularMinRoughness = FMath::Clamp(bGlobalSGEnabled ? CVarSGSpecularMinRoughness.GetValueOnGameThread() : SGSpecularMinRoughness, -1.0f, 1.0f);
+		ComponentData.SkyVisibilityIntensity = FMath::Clamp(SkyVisibilityIntensity, 0.0f, 1.0f);
 
 		if (ScrollProbesInfinitely)
 		{

@@ -1,0 +1,190 @@
+/*
+* Sky visibility compute: sample DDGI distance texture → intermediate R8 RT.
+* Composite pass RMW-writes min into GBufferC.a (no SRV+UAV on same resource).
+*/
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Plugin/RTXGI/Private/SDK/ddgi/Irradiance.ush"
+
+#ifndef RTXGI_SKYVIS_MAX_VOLUMES
+#define RTXGI_SKYVIS_MAX_VOLUMES 4
+#endif
+
+Texture2D<float>    DepthTexture;
+Texture2D<float4>   NormalTexture;
+Texture2D<float4>   GBufferBTexture;
+
+SamplerState        PointClampSampler;
+SamplerState        LinearClampSampler;
+
+int2                ViewOffset;
+int2                DispatchSize;
+int2                FullViewSize;
+int                 SampleCount;
+int                 NumVolumes;
+
+Texture2D<float4>   Volume_0_ProbeDistance;
+Texture2D<float4>   Volume_0_ProbeOffsets;
+Texture2D<uint>     Volume_0_ProbeStates;
+float3              Volume_0_Position;
+float4              Volume_0_Rotation;
+float3              Volume_0_Radius;
+float3              Volume_0_ProbeGridSpacing;
+int3                Volume_0_ProbeGridCounts;
+int                 Volume_0_ProbeNumDistanceTexels;
+int3                Volume_0_ProbeScrollOffsets;
+float               Volume_0_SkyVisibilityIntensity;
+
+Texture2D<float4>   Volume_1_ProbeDistance;
+Texture2D<float4>   Volume_1_ProbeOffsets;
+Texture2D<uint>     Volume_1_ProbeStates;
+float3              Volume_1_Position;
+float4              Volume_1_Rotation;
+float3              Volume_1_Radius;
+float3              Volume_1_ProbeGridSpacing;
+int3                Volume_1_ProbeGridCounts;
+int                 Volume_1_ProbeNumDistanceTexels;
+int3                Volume_1_ProbeScrollOffsets;
+float               Volume_1_SkyVisibilityIntensity;
+
+Texture2D<float4>   Volume_2_ProbeDistance;
+Texture2D<float4>   Volume_2_ProbeOffsets;
+Texture2D<uint>     Volume_2_ProbeStates;
+float3              Volume_2_Position;
+float4              Volume_2_Rotation;
+float3              Volume_2_Radius;
+float3              Volume_2_ProbeGridSpacing;
+int3                Volume_2_ProbeGridCounts;
+int                 Volume_2_ProbeNumDistanceTexels;
+int3                Volume_2_ProbeScrollOffsets;
+float               Volume_2_SkyVisibilityIntensity;
+
+Texture2D<float4>   Volume_3_ProbeDistance;
+Texture2D<float4>   Volume_3_ProbeOffsets;
+Texture2D<uint>     Volume_3_ProbeStates;
+float3              Volume_3_Position;
+float4              Volume_3_Rotation;
+float3              Volume_3_Radius;
+float3              Volume_3_ProbeGridSpacing;
+int3                Volume_3_ProbeGridCounts;
+int                 Volume_3_ProbeNumDistanceTexels;
+int3                Volume_3_ProbeScrollOffsets;
+float               Volume_3_SkyVisibilityIntensity;
+
+RWTexture2D<float>  SkyVisOutput;
+
+bool IsInsideVolume(float3 WorldPosition, float3 Origin, float4 Rotation, float3 Radius)
+{
+	float3 RelPos = WorldPosition - Origin;
+	RelPos = abs(RTXGIQuaternionRotate(RelPos, RTXGIQuaternionConjugate(Rotation)));
+	return RelPos.x <= Radius.x && RelPos.y <= Radius.y && RelPos.z <= Radius.z;
+}
+
+float EvalVolumeSkyVisibility(
+	float3 WorldPosition,
+	float3 Normal,
+	Texture2D<float4> ProbeDistance,
+	Texture2D<float4> ProbeOffsets,
+	Texture2D<uint> ProbeStates,
+	float3 Position,
+	float4 Rotation,
+	float3 ProbeGridSpacing,
+	int3 ProbeGridCounts,
+	int ProbeNumDistanceTexels,
+	int3 ProbeScrollOffsets,
+	float Intensity)
+{
+	DDGIVolumeDescGPU Volume;
+	Volume.origin = Position;
+	Volume.rotation = Rotation;
+	Volume.probeGridSpacing = ProbeGridSpacing;
+	Volume.probeGridCounts = ProbeGridCounts;
+	Volume.probeNumDistanceTexels = ProbeNumDistanceTexels;
+	Volume.probeNumIrradianceTexels = ProbeNumDistanceTexels; // unused by skyVis
+	Volume.probeIrradianceEncodingGamma = 1.0f;
+	Volume.normalBias = 0.0f;
+	Volume.viewBias = 0.0f;
+	Volume.probeScrollOffsets = ProbeScrollOffsets;
+
+	DDGIVolumeResources Resources;
+	Resources.probeIrradianceSRV = ProbeDistance; // unused
+	Resources.probeDistanceSRV = ProbeDistance;
+	Resources.bilinearSampler = LinearClampSampler;
+#if RTXGI_DDGI_PROBE_RELOCATION
+	Resources.probeOffsetsSRV = ProbeOffsets;
+#endif
+#if RTXGI_DDGI_PROBE_CLASSIFICATION
+	Resources.probeStatesSRV = ProbeStates;
+#endif
+
+	float skyVis = DDGIGetVolumeSkyVisibility(WorldPosition, Normal, Volume, Resources, SampleCount);
+	return lerp(1.0f, skyVis, Intensity);
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
+{
+	if (any(DispatchThreadID.xy >= (uint2)DispatchSize))
+	{
+		return;
+	}
+
+	// Map low-res dispatch pixel → full-res GBuffer UV (center of corresponding block)
+	float2 FullUV = (float2(DispatchThreadID.xy) + 0.5f) / float2(DispatchSize);
+	int2 FullPixel = int2(FullUV * float2(FullViewSize)) + ViewOffset;
+	float2 BufferUV = (float2(FullPixel) + 0.5f) * View.BufferSizeAndInvSize.zw;
+
+	float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+	if (DeviceZ == 0.0f)
+	{
+		SkyVisOutput[DispatchThreadID.xy] = 1.0f;
+		return;
+	}
+
+	// Skip Unlit — GBufferB packs shading model id
+	float4 GBufferB = GBufferBTexture.SampleLevel(PointClampSampler, BufferUV, 0);
+	uint ShadingModelId = DecodeShadingModelId(GBufferB.a);
+	if (ShadingModelId == SHADINGMODELID_UNLIT)
+	{
+		SkyVisOutput[DispatchThreadID.xy] = 1.0f;
+		return;
+	}
+
+	float SceneDepth = ConvertFromDeviceZ(DeviceZ);
+	float2 ScreenPos = FullUV * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f);
+	float3 InScreenVector = mul(float4(ScreenPos, 1, 0), View.ScreenToTranslatedWorld).xyz;
+#if UE4_COMPAT
+	float3 WorldPosition = InScreenVector * SceneDepth + View.WorldCameraOrigin;
+#else
+	float3 WorldPosition = InScreenVector * SceneDepth + LWCHackToFloat(PrimaryView.WorldCameraOrigin);
+#endif
+	float3 Normal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
+
+	// Densest-first: first containing volume wins
+	float Result = 1.0f;
+	bool bFound = false;
+
+#define TRY_VOLUME(i) \
+	if (!bFound && i < NumVolumes) \
+	{ \
+		if (IsInsideVolume(WorldPosition, Volume_##i##_Position, Volume_##i##_Rotation, Volume_##i##_Radius)) \
+		{ \
+			Result = EvalVolumeSkyVisibility( \
+				WorldPosition, Normal, \
+				Volume_##i##_ProbeDistance, Volume_##i##_ProbeOffsets, Volume_##i##_ProbeStates, \
+				Volume_##i##_Position, Volume_##i##_Rotation, Volume_##i##_ProbeGridSpacing, \
+				Volume_##i##_ProbeGridCounts, Volume_##i##_ProbeNumDistanceTexels, \
+				Volume_##i##_ProbeScrollOffsets, Volume_##i##_SkyVisibilityIntensity); \
+			bFound = true; \
+		} \
+	}
+
+	TRY_VOLUME(0)
+	TRY_VOLUME(1)
+	TRY_VOLUME(2)
+	TRY_VOLUME(3)
+#undef TRY_VOLUME
+
+	SkyVisOutput[DispatchThreadID.xy] = Result;
+}

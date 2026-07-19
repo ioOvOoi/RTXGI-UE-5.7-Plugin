@@ -73,7 +73,8 @@ float3 DDGIGetVolumeIrradiance(
     float3 surfaceBias,
     float3 direction,
     DDGIVolumeDescGPU volume,
-    DDGIVolumeResources resources)
+    DDGIVolumeResources resources,
+    float chebyshevFloor)
 {
     float3 irradiance = float3(0.f, 0.f, 0.f);
     float  accumulatedWeights = 0.f;
@@ -177,7 +178,8 @@ float3 DDGIGetVolumeIrradiance(
 
         // Avoid visibility weights ever going all the way to zero because
         // when *no* probe has visibility we need a fallback value
-        weight *= max(0.05f, chebyshevWeight);
+        // ponytail: floor from CVar so sky visibility owns large-scale occlusion
+        weight *= max(chebyshevFloor, chebyshevWeight);
 
         // Avoid a weight of zero
         weight = max(0.000001f, weight);
@@ -223,6 +225,103 @@ float3 DDGIGetVolumeIrradiance(
 #endif
 
     return irradiance;
+}
+
+/**
+* Builds an orthonormal basis with Z = normal (for hemisphere sampling).
+*/
+float3x3 DDGIGetNormalBasis(float3 normal)
+{
+    float3 up = (abs(normal.z) < 0.999f) ? float3(0.f, 0.f, 1.f) : float3(1.f, 0.f, 0.f);
+    float3 tangent = normalize(cross(up, normal));
+    float3 bitangent = cross(normal, tangent);
+    return float3x3(tangent, bitangent, normal);
+}
+
+/**
+* Hemisphere direction i of N, oriented about surfaceNormal.
+* SampleCount=1 uses the normal; otherwise cosine-weighted Fibonacci on the hemisphere.
+*/
+float3 DDGIGetSkyVisibilitySampleDirection(float3 surfaceNormal, int sampleIndex, int sampleCount)
+{
+    if (sampleCount <= 1)
+    {
+        return surfaceNormal;
+    }
+
+    // Cosine-weighted hemisphere Fibonacci in local +Z, then rotate to normal
+    const float b = (sqrt(5.f) * 0.5f + 0.5f) - 1.f;
+    float phi = RTXGI_2PI * frac(float(sampleIndex) * b);
+    float cosTheta = 1.f - (float(sampleIndex) + 0.5f) / float(sampleCount);
+    float sinTheta = sqrt(saturate(1.f - cosTheta * cosTheta));
+    float3 localDir = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    return normalize(mul(localDir, DDGIGetNormalBasis(surfaceNormal)));
+}
+
+/**
+* Sky visibility [0,1] from probe distance texture (1e27f sky-miss sentinel → threshold 1e10f).
+* 8-neighborhood trilinear blend × N hemisphere directions. Skips inactive probes.
+*/
+float DDGIGetVolumeSkyVisibility(
+    float3 worldPosition,
+    float3 surfaceNormal,
+    DDGIVolumeDescGPU volume,
+    DDGIVolumeResources resources,
+    int sampleCount)
+{
+    int clampedSampleCount = clamp(sampleCount, 1, 16);
+    float accumulatedVisibility = 0.f;
+    float accumulatedWeights = 0.f;
+
+    int3 baseProbeCoords = DDGIGetBaseProbeGridCoords(worldPosition, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+    float3 baseProbeWorldPosition = DDGIGetProbeWorldPosition(baseProbeCoords, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+    float3 distanceVolumeSpace = RTXGIQuaternionRotate(worldPosition - baseProbeWorldPosition, RTXGIQuaternionConjugate(volume.rotation));
+    float3 alpha = clamp((distanceVolumeSpace / volume.probeGridSpacing), float3(0.f, 0.f, 0.f), float3(1.f, 1.f, 1.f));
+
+    for (int probeIndex = 0; probeIndex < 8; probeIndex++)
+    {
+        int3 adjacentProbeOffset = int3(probeIndex, probeIndex >> 1, probeIndex >> 2) & int3(1, 1, 1);
+        int3 adjacentProbeCoords = clamp(baseProbeCoords + adjacentProbeOffset, int3(0, 0, 0), volume.probeGridCounts - int3(1, 1, 1));
+        int adjacentProbeIndex = DDGIGetProbeIndex(adjacentProbeCoords, volume.probeGridCounts);
+
+    #if RTXGI_DDGI_PROBE_CLASSIFICATION
+        {
+            #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                int stateProbeIndex = DDGIGetProbeIndexOffset(adjacentProbeIndex, volume.probeGridCounts, volume.probeScrollOffsets);
+            #else
+                int stateProbeIndex = adjacentProbeIndex;
+            #endif
+            int2 texelPosition = DDGIGetProbeTexelPosition(stateProbeIndex, volume.probeGridCounts);
+            int probeState = resources.probeStatesSRV[texelPosition];
+            if (probeState == PROBE_STATE_INACTIVE) continue;
+        }
+    #endif
+
+        float3 trilinear = max(0.001f, lerp(1.f - alpha, alpha, adjacentProbeOffset));
+        float trilinearWeight = (trilinear.x * trilinear.y * trilinear.z);
+
+        float probeSkyVisibility = 0.f;
+        for (int sampleIndex = 0; sampleIndex < clampedSampleCount; sampleIndex++)
+        {
+            float3 sampleDir = DDGIGetSkyVisibilitySampleDirection(surfaceNormal, sampleIndex, clampedSampleCount);
+            float2 octantCoords = DDGIGetOctahedralCoordinates(sampleDir);
+        #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+            float2 probeTextureCoords = DDGIGetProbeUV(adjacentProbeIndex, octantCoords, volume.probeGridCounts, volume.probeNumDistanceTexels, volume.probeScrollOffsets);
+        #else
+            float2 probeTextureCoords = DDGIGetProbeUV(adjacentProbeIndex, octantCoords, volume.probeGridCounts, volume.probeNumDistanceTexels);
+        #endif
+            // ponytail: 1e27f sky-miss from ProbeUpdate; 1e10f threshold matches design D1
+            float meanDistance = resources.probeDistanceSRV.SampleLevel(resources.bilinearSampler, probeTextureCoords, 0).r;
+            probeSkyVisibility += (meanDistance > 1e10f) ? 1.f : 0.f;
+        }
+        probeSkyVisibility *= (1.f / float(clampedSampleCount));
+
+        accumulatedVisibility += probeSkyVisibility * trilinearWeight;
+        accumulatedWeights += trilinearWeight;
+    }
+
+    if (accumulatedWeights == 0.f) return 1.f;
+    return saturate(accumulatedVisibility / accumulatedWeights);
 }
 
 #endif // RTXGI_DDGI_IRRADIANCE_HLSL
