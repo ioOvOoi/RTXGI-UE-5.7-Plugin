@@ -11,3 +11,8 @@ progress.md
 .slim/worktrees/
 .slim/worktrees.json
 # END oh-my-opencode-slim worktrees
+# Scratch / agent temp
+agent-tools/
+NumVolumes
+ShouldUsePreExposure
+PCG.excalidraw.json
