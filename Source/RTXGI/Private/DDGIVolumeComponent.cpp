@@ -1196,6 +1196,28 @@ static void SaveFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixe
 	if (bSaveFormat) Ar << texturePixels.Desc.PixelFormat;
 }
 
+// ponytail: helper used by PostEditChangeProperty and SetNextBake initial path.
+// Populates LoadContext from a bake asset and creates RHI textures synchronously.
+// Caller must call MarkRenderDynamicDataDirty() afterwards.
+static void LoadBakeIntoLoadContext(UDDGIBakeDataAsset* Bake, FDDGITextureLoadContext& Ctx)
+{
+	Bake->Irradiance.ToTexturePixels(Ctx.Irradiance);
+	Bake->Distance.ToTexturePixels(Ctx.Distance);
+	Bake->Offsets.ToTexturePixels(Ctx.Offsets);
+	Bake->States.ToTexturePixels(Ctx.States);
+	if (Bake->SGAmplitudes.Desc.Width > 0)
+		Bake->SGAmplitudes.ToTexturePixels(Ctx.SGAmplitudes);
+
+	FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
+	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Irradiance, (EPixelFormat)Ctx.Irradiance.Desc.PixelFormat);
+	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Distance, (EPixelFormat)Ctx.Distance.Desc.PixelFormat);
+	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Offsets, (EPixelFormat)Ctx.Offsets.Desc.PixelFormat);
+	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.States, (EPixelFormat)Ctx.States.Desc.PixelFormat);
+	if (Ctx.SGAmplitudes.Desc.Width > 0)
+		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.SGAmplitudes, (EPixelFormat)Ctx.SGAmplitudes.Desc.PixelFormat);
+	Ctx.ReadyForLoad = true;
+}
+
 static void LoadFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixels, EPixelFormat expectedPixelFormat, bool bLoadFormat)
 {
 	check(Ar.IsLoading());
@@ -1849,29 +1871,7 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 		CurrentBake = NextBake;
 		NextBake = nullptr;
 
-		UDDGIBakeDataAsset* Bake = CurrentBake;
-
-		// Convert payloads to FDDGITexturePixels (copies desc + pixels)
-		Bake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
-		Bake->Distance.ToTexturePixels(LoadContext.Distance);
-		Bake->Offsets.ToTexturePixels(LoadContext.Offsets);
-		Bake->States.ToTexturePixels(LoadContext.States);
-		if (Bake->SGAmplitudes.Desc.Width > 0)
-		{
-			Bake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
-		}
-
-		// Create RHI textures synchronously on game thread (same as PostEditChangeProperty path).
-		// Using FRHICommandListImmediate::Get() avoids the race where UpdateRenderThreadData
-		// copies LoadContext before the render command sets ReadyForLoad.
-		FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
-		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Irradiance, (EPixelFormat)LoadContext.Irradiance.Desc.PixelFormat);
-		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Distance, (EPixelFormat)LoadContext.Distance.Desc.PixelFormat);
-		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Offsets, (EPixelFormat)LoadContext.Offsets.Desc.PixelFormat);
-		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.States, (EPixelFormat)LoadContext.States.Desc.PixelFormat);
-		if (LoadContext.SGAmplitudes.Desc.Width > 0)
-			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.SGAmplitudes, (EPixelFormat)LoadContext.SGAmplitudes.Desc.PixelFormat);
-		LoadContext.ReadyForLoad = true;
+		LoadBakeIntoLoadContext(CurrentBake, LoadContext);
 	}
 	else
 	{
@@ -2051,20 +2051,7 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 				{
 					// Initial bake (no previous bake): load directly.
 					VolumeMode = EDDGIVolumeMode::BakeDriven;
-					CurrentBake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
-					CurrentBake->Distance.ToTexturePixels(LoadContext.Distance);
-					CurrentBake->Offsets.ToTexturePixels(LoadContext.Offsets);
-					CurrentBake->States.ToTexturePixels(LoadContext.States);
-					if (CurrentBake->SGAmplitudes.Desc.Width > 0)
-						CurrentBake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
-					FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Irradiance, (EPixelFormat)LoadContext.Irradiance.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Distance, (EPixelFormat)LoadContext.Distance.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Offsets, (EPixelFormat)LoadContext.Offsets.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.States, (EPixelFormat)LoadContext.States.Desc.PixelFormat);
-					if (LoadContext.SGAmplitudes.Desc.Width > 0)
-						CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.SGAmplitudes, (EPixelFormat)LoadContext.SGAmplitudes.Desc.PixelFormat);
-					LoadContext.ReadyForLoad = true;
+					LoadBakeIntoLoadContext(CurrentBake, LoadContext);
 					MarkRenderDynamicDataDirty();
 				}
 			}
