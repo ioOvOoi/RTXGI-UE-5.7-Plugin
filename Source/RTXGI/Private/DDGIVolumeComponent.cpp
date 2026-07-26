@@ -2044,17 +2044,38 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 		if (CurrentBake != nullptr)
 		{
 			VolumeMode = EDDGIVolumeMode::BakeDriven;
-			// Load bake textures into proxy so editor preview works
-			SetNextBake(CurrentBake, 0);
+			// Load bake textures into LoadContext (proxy may not exist yet in editor)
+			CurrentBake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
+			CurrentBake->Distance.ToTexturePixels(LoadContext.Distance);
+			CurrentBake->Offsets.ToTexturePixels(LoadContext.Offsets);
+			CurrentBake->States.ToTexturePixels(LoadContext.States);
+			if (CurrentBake->SGAmplitudes.Desc.Width > 0)
+			{
+				CurrentBake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
+			}
+			FDDGITextureLoadContext& Ctx = LoadContext;
+			ENQUEUE_RENDER_COMMAND(DDGILoadBakeTextures)(
+				[&Ctx](FRHICommandListImmediate& RHICmdList)
+				{
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Irradiance, (EPixelFormat)Ctx.Irradiance.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Distance, (EPixelFormat)Ctx.Distance.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Offsets, (EPixelFormat)Ctx.Offsets.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.States, (EPixelFormat)Ctx.States.Desc.PixelFormat);
+					if (Ctx.SGAmplitudes.Desc.Width > 0)
+						CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.SGAmplitudes, (EPixelFormat)Ctx.SGAmplitudes.Desc.PixelFormat);
+					Ctx.ReadyForLoad = true;
+				}
+			);
 		}
 		else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
 		{
 			// Intentional SoT: clearing bake payload drops to Runtime (never auto-Static).
 			VolumeMode = EDDGIVolumeMode::Runtime;
-			SetNextBake(nullptr, 0);
+			LoadContext.ReadyForLoad = false;
 		}
+		MarkRenderDynamicDataDirty();
 		Super::PostEditChangeProperty(PropertyChangedEvent);
-		return; // SetNextBake already marks dirty
+		return;
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, VolumeMode))
 	{
