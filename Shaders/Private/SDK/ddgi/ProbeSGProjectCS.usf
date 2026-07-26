@@ -1,0 +1,139 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Plugin/RTXGI/Private/SDK/ddgi/Irradiance.ush"
+#include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
+
+// Per-dispatch uniforms (top-level SHADER_PARAMETER on FDDGISGProject::FParameters).
+// UE FGlobalShader does not auto-inject these declarations - declare explicitly.
+int SGLobeCount;
+int ProbeIndexStart;
+int ProbeIndexCount;
+
+// Input: ray radiance+distance atlas from probe trace pass (x=rayIndex, y=probeIndex)
+RWTexture2D<float4> DDGIVolumeRayDataUAV;
+// Output: per-probe SG amplitude atlas (x=baseLobeX+lobeIndex, y=probeY)
+RWTexture2D<float4> DDGIVolumeSGAmplitudeOutUAV;
+
+// Weighted-projection of probe ray radiance onto fixed-basis SG lobes.
+// One thread per probe. Loops over all probe rays, accumulates per-lobe
+// weighted radiance, normalizes, then writes to the SG amplitude atlas.
+[numthreads(64, 1, 1)]
+void DDGIProbeSGProjectCS(uint3 DispatchThreadID : SV_DispatchThreadID)
+{
+	int probeIndex = int(DispatchThreadID.x);
+	int probeCount = DDGIVolume.probeGridCounts.x * DDGIVolume.probeGridCounts.y * DDGIVolume.probeGridCounts.z;
+	if (probeIndex >= probeCount) return;
+
+	// ponytail: round-robin guard — mirrors ProbeBlendingCS.usf:119-120.
+	// RTRadiance only writes ray data for probes in [ProbeIndexStart, ProbeIndexStart+ProbeIndexCount);
+	// every other probe's row in DDGIVolumeRayDataUAV is undefined/garbage this frame. Without this
+	// early-return, we'd re-project garbage into the SG amplitude atlas every frame, then the
+	// threshold-snap hysteresis (Phase 4 commit 3ff9f6d) would aggressively adopt that garbage,
+	// manifesting as RGB flicker in occluded / relocated / inactive probe regions.
+	int probeRRIndex = (probeIndex < ProbeIndexStart) ? probeIndex + probeCount : probeIndex;
+	if (probeRRIndex >= ProbeIndexStart + ProbeIndexCount) return;
+
+	int3 probeGridCounts = DDGIVolume.probeGridCounts;
+	int probeCount2D = probeGridCounts.y * probeGridCounts.z;
+
+	// Compute output texture coordinates for this probe
+#if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+	int storageProbeIndex = DDGIGetProbeIndexOffset(probeIndex, probeGridCounts, DDGIVolume.probeScrollOffsets);
+#else
+	int storageProbeIndex = probeIndex;
+#endif
+	int outY = storageProbeIndex / probeCount2D;
+	int clampedSGLobeCount = RTXGISGClampLobeCount(SGLobeCount);
+	int outBaseX = (storageProbeIndex % probeCount2D) * clampedSGLobeCount;
+
+	// Precompute the Fibonacci SG basis axes once per thread (clamped count).
+	// RTXGISGGetAxis computes a full spiral parametrised by LobeCount, so a low
+	// N (e.g. 4) still spans the whole sphere. Computing per-ray in-loop trig in
+	// the inner loop costs ~numRays*LobeCount trig sets; this hoists to LobeCount.
+	float3 sgAxes[RTXGI_MAX_SG_LOBE_COUNT];
+	for (int ax = 0; ax < clampedSGLobeCount; ++ax)
+		sgAxes[ax] = RTXGISGGetAxis(ax, clampedSGLobeCount);
+
+	// Accumulator arrays on stack (HLSL compiles to registers)
+	float3 amplitudes[RTXGI_MAX_SG_LOBE_COUNT];
+	float weightSums[RTXGI_MAX_SG_LOBE_COUNT];
+
+	// Initialize with epsilon floor to avoid division-by-zero
+	for (int k = 0; k < clampedSGLobeCount; ++k)
+	{
+		amplitudes[k] = float3(0.0f, 0.0f, 0.0f);
+		weightSums[k] = 1e-6f;
+	}
+
+	int numRays = DDGIVolume.numRaysPerProbe;
+	float4x4 rotation = DDGIVolume.probeRayRotationTransform;
+
+	for (int rayIndex = 0; rayIndex < numRays; ++rayIndex)
+	{
+		// Read radiance — handle both high-bit and low-bit (packed) formats
+		float4 rayData = DDGIVolumeRayDataUAV[int2(rayIndex, probeIndex)];
+		float3 radiance;
+#if RTXGI_DDGI_FORMAT_RADIANCE
+		radiance = rayData.rgb;
+#else
+		radiance = RTXGIUintToFloat3(asuint(rayData.r));
+#endif
+
+		// Reconstruct ray direction (same algorithm as ProbeUpdateRGS)
+		float3 rayDir = DDGIGetProbeRayDirection(rayIndex, numRays, rotation);
+		// ponytail: hoist normalize out of the SG lobe loop (was implicit in RTXGISGEvaluate)
+		float3 rayDirN = normalize(rayDir);
+
+		// Weighted projection against fixed SG basis using precomputed axes.
+		// Inline the SG evaluate: exp(sharpness * (dot - 1)) avoids per-call clamp/trig.
+		for (int k = 0; k < clampedSGLobeCount; ++k)
+		{
+			float cosAngle = dot(rayDirN, sgAxes[k]);
+			float w = exp(RTXGI_SG_UNIFORM_SHARPNESS * (cosAngle - 1.0f));
+			amplitudes[k] += radiance * w;
+			weightSums[k] += w;
+		}
+	}
+
+	// Normalize and write output per lobe with temporal hysteresis.
+	// Aligns our change/brightness thresholds and hysteresis reduction with the
+	// octa IrradianceBlend convention (ProbeBlendingCS.usf:327-338):
+	//   - change-threshold fires on per-lobe darkening delta (previous - newAmp),
+	//     matched by RTXGIMaxComponent; lowers hysteresis by 0.75 for near-instant snap;
+	//   - brightness-threshold clamps per-frame delta magnitude to 1/4 of itself.
+	float hysteresis = DDGIVolume.probeHysteresis;
+	for (int k = 0; k < clampedSGLobeCount; ++k)
+	{
+		float3 newAmp = amplitudes[k] / weightSums[k];
+		int2 outCoord = int2(outBaseX + k, outY);
+
+		// Read previous amplitude and blend (typed UAV load)
+		float3 oldAmp = DDGIVolumeSGAmplitudeOutUAV[outCoord].rgb;
+
+		// Lower hysteresis when a large lighting change is detected
+		if (RTXGIMaxComponent(oldAmp - newAmp) > DDGIVolume.probeChangeThreshold)
+		{
+			hysteresis = max(0.f, hysteresis - 0.75f);
+		}
+
+		// Clamp the maximum change per frame when a large brightness change is detected
+		float3 delta = newAmp - oldAmp;
+		if (length(delta) > DDGIVolume.probeBrightnessThreshold)
+		{
+			newAmp = oldAmp + (delta * 0.25f);
+		}
+
+		float3 blended = lerp(newAmp, oldAmp, hysteresis);
+		DDGIVolumeSGAmplitudeOutUAV[outCoord] = float4(blended, 0.0f);
+	}
+}

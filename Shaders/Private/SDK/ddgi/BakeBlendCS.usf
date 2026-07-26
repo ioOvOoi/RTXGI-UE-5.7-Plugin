@@ -1,0 +1,39 @@
+/*
+* Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+// --------------------------------------------------------------------------------------
+// BakeBlendCS.usf
+//
+// Per-texel lerp between current and next bake textures.
+// Used for DDGI crossfade at runtime with zero ray-tracing cost.
+// Format-agnostic: reads/writes float4 regardless of the underlying texture format.
+// Handles: Irradiance, Distance, Offsets, SGAmplitudes.
+// States texture is NOT handled by this shader — copied separately via AddCopyTexturePass.
+// ponytail: Distance textures are 2-channel (G32R32F/G16R16F) — RHI zero-fills missing
+// SRV channels (.zw=0) and discards extra UAV channels on write. The float4 lerp is
+// correct for the .xy components that actually matter.
+// --------------------------------------------------------------------------------------
+
+#include "/Engine/Private/Common.ush"
+
+Texture2D<float4> CurrentBakeSRV;
+Texture2D<float4> NextBakeSRV;
+RWTexture2D<float4> LiveUAV;
+float BlendAlpha;
+int3 TextureSize;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any(DTid.xy >= TextureSize.xy))
+		return;
+
+	LiveUAV[DTid.xy] = lerp(CurrentBakeSRV[DTid.xy], NextBakeSRV[DTid.xy], BlendAlpha);
+}

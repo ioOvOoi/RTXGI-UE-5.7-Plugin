@@ -1,0 +1,111 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#ifndef RTXGI_SG_LIGHTING_USH
+#define RTXGI_SG_LIGHTING_USH
+
+#include "/Plugin/RTXGI/Private/SDK/SGBasis.ush"
+
+// SG lighting helpers for evaluating SG radiance probe data.
+float3 RTXGISGEvaluateRadiance(float3 Direction, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
+{
+	float3 result = float3(0.0f, 0.0f, 0.0f);
+	int Count = RTXGISGClampLobeCount(SGLobeCount);
+	for (int k = 0; k < Count; ++k)
+	{
+		float w = RTXGISGEvaluate(Direction, k, Count);
+		result += Amplitudes[k] * w;
+	}
+	return result;
+}
+
+// Compute diffuse irradiance from SG radiance.
+// Approximates ∫ L(v) * max(0, dot(n,v)) dv using inner product
+// of each SG lobe with a fixed-width cosine SG approximation.
+float3 RTXGISGDiffuseIrradiance(float3 Normal, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
+{
+	static const float CosineSharpness = 2.0f;
+	float3 N = normalize(Normal);
+	float3 irradiance = float3(0.0f, 0.0f, 0.0f);
+	int Count = RTXGISGClampLobeCount(SGLobeCount);
+
+	for (int k = 0; k < Count; ++k)
+	{
+		float cosTheta = dot(N, RTXGISGGetAxis(k, Count));
+		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + CosineSharpness;
+		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * CosineSharpness) / sumLambda;
+		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
+		irradiance += Amplitudes[k] * innerProduct;
+	}
+	return irradiance;
+}
+
+// Compact UE-style environment BRDF approximation for material-aware indirect specular.
+float3 RTXGISGEnvBRDFApprox(float3 F0, float Roughness, float NoV)
+{
+	float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+	float4 c1 = float4( 1.0f,  0.0425f,  1.040f, -0.040f);
+	float4 r = Roughness * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
+	float2 AB = float2(-1.04f, 1.04f) * a004 + r.zw;
+	return F0 * AB.x + AB.y;
+}
+
+// Material-aware rough SG specular for DDGI probe radiance.
+//
+// ponytail: rough specular is a wide lobe around the reflection direction R,
+// not a single sample at R. Sampling radiance only at R (the previous
+// implementation) lets high-frequency SG lobes leak through on rough surfaces
+// as specular noise. The correct evaluation is the inner product of each SG
+// radiance lobe with a roughness-controlled "specular SG" centered at R — the
+// same closed-form inner product used by RTXGISGDiffuseIrradiance, just with a
+// roughness-driven sharpness instead of the fixed cosine sharpness.
+//
+// This is mathematically equivalent to convolving the SG radiance field with
+// a roughness-width BRDF lobe and sampling the result at R. It does NOT need
+// a mip chain or a separate prefilter pass: the SG basis is already a set of
+// fixed-direction lobes, so the "prefilter" is just a per-lobe weight in the
+// inner-product sum. The split-sum DF term (RTXGISGEnvBRDFApprox) remains
+// responsible for the NdotV / F0 scaling.
+float3 RTXGISGSpecularIBL(float3 Normal, float3 View, float Roughness, float3 F0, float3 Amplitudes[RTXGI_MAX_SG_LOBE_COUNT], int SGLobeCount)
+{
+	float3 N = normalize(Normal);
+	float3 V = normalize(-View);
+	float NoV = saturate(dot(N, V));
+	float3 R = normalize(reflect(View, N));
+
+	float perceptualRoughness = saturate(Roughness);
+
+	// Rough specular lobe sharpness. GGX-style: sharper lobe for low roughness,
+	// wider lobe for high roughness. The 2.0 / (roughness^2) form matches the
+	// cosine-lobe approximation used by the diffuse path (which uses sharpness 2).
+	// Clamped to avoid degenerate sharpness at roughness=0 (would sample only R,
+	// same as the old behavior — acceptable limit) and to keep the inner-product
+	// numerically stable at roughness=1 (sharpness stays >= 2, same as diffuse).
+	float specSharpness = max(2.0f, 2.0f / max(perceptualRoughness * perceptualRoughness, 1e-3f));
+
+	int Count = RTXGISGClampLobeCount(SGLobeCount);
+	float3 radiance = float3(0.0f, 0.0f, 0.0f);
+	for (int k = 0; k < Count; ++k)
+	{
+		float cosTheta = dot(R, RTXGISGGetAxis(k, Count));
+		float sumLambda = RTXGI_SG_UNIFORM_SHARPNESS + specSharpness;
+		float productTerm = (RTXGI_SG_UNIFORM_SHARPNESS * specSharpness) / sumLambda;
+		float innerProduct = (2.0f * RTXGI_PI / sumLambda) * exp(productTerm * (cosTheta - 1.0f));
+		radiance += Amplitudes[k] * innerProduct;
+	}
+
+	float3 brdf = RTXGISGEnvBRDFApprox(F0, perceptualRoughness, NoV);
+
+	float horizon = saturate(dot(N, R));
+	return radiance * brdf * horizon;
+}
+
+#endif // RTXGI_SG_LIGHTING_USH

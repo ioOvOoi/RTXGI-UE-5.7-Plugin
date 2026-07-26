@@ -1,0 +1,42 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
+#ifndef RTXGI_SG_BASIS_USH
+#define RTXGI_SG_BASIS_USH
+
+#ifndef RTXGI_MAX_SG_LOBE_COUNT
+#define RTXGI_MAX_SG_LOBE_COUNT 32
+#endif
+
+static const float RTXGI_SG_UNIFORM_SHARPNESS = 3.0f;
+static const float RTXGI_SG_GOLDEN_ANGLE = 2.39996322972865332f;
+
+int RTXGISGClampLobeCount(int LobeCount)
+{
+	return clamp(LobeCount, 4, RTXGI_MAX_SG_LOBE_COUNT);
+}
+
+float3 RTXGISGGetAxis(uint LobeIndex, int LobeCount)
+{
+	int Count = RTXGISGClampLobeCount(LobeCount);
+	float i = float(min(LobeIndex, (uint)(Count - 1))) + 0.5f;
+	float z = 1.0f - (2.0f * i / float(Count));
+	float r = sqrt(saturate(1.0f - z * z));
+	float phi = i * RTXGI_SG_GOLDEN_ANGLE;
+	return float3(cos(phi) * r, sin(phi) * r, z);
+}
+
+float RTXGISGEvaluate(float3 Direction, uint LobeIndex, int LobeCount)
+{
+	float CosAngle = dot(normalize(Direction), RTXGISGGetAxis(LobeIndex, LobeCount));
+	return exp(RTXGI_SG_UNIFORM_SHARPNESS * (CosAngle - 1.0f));
+}
+
+#endif // RTXGI_SG_BASIS_USH

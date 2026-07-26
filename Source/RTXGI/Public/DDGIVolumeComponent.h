@@ -21,6 +21,7 @@
 #include "Runtime/Launch/Resources/Version.h"
 
 #include "DDGIUtilities.h"
+#include "DDGIBakeDataAsset.h"
 
 #include "DDGIVolumeComponent.generated.h"
 
@@ -56,6 +57,14 @@ enum class EDDGIRaysPerProbe
 	n1008 = 1008 UMETA(DisplayName = "1008")
 };
 
+UENUM(BlueprintType)
+enum class EDDGIVolumeMode : uint8
+{
+	Runtime     UMETA(DisplayName = "Runtime (Dynamic RT)"),
+	Static      UMETA(DisplayName = "Static (Frozen Snapshot)"),
+	BakeDriven  UMETA(DisplayName = "Bake-Driven (Asset Crossfade)"),
+};
+
 UENUM()
 enum class EDDGISkyLightType
 {
@@ -85,6 +94,10 @@ struct FDDGITextureLoadContext
 	FDDGITexturePixels Distance;
 	FDDGITexturePixels Offsets;
 	FDDGITexturePixels States;
+	// ponytail: SG amplitude atlas is optional — only populated when bSGEnabled
+	// at save time and CustomVer >= SaveLoadSGAmplitudes at load time. Cleared
+	// automatically by Clear() since it reassigns *this = FDDGITextureLoadContext().
+	FDDGITexturePixels SGAmplitudes;
 
 	void Clear()
 	{
@@ -146,6 +159,8 @@ public:
 		static const EPixelFormat c_pixelFormatRadianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatIrradianceLowBitDepth = EPixelFormat::PF_A2B10G10R10;
 		static const EPixelFormat c_pixelFormatIrradianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
+		static const EPixelFormat c_pixelFormatSGAmplitudesLowBitDepth = EPixelFormat::PF_FloatRGBA;
+		static const EPixelFormat c_pixelFormatSGAmplitudesHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceHighBitDepth = EPixelFormat::PF_G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceLowBitDepth = EPixelFormat::PF_G16R16F;
 		static const EPixelFormat c_pixelFormatOffsets = EPixelFormat::PF_A16B16G16R16;
@@ -192,19 +207,37 @@ public:
 		float IrradianceScalar = 1.0f;
 		float EmissiveMultiplier = 1.0f;
 		float LightingMultiplier = 1.0f;
-		bool RuntimeStatic = false; // If true, does not update during gameplay, only during editor.
+		EDDGIVolumeMode Mode = EDDGIVolumeMode::Runtime; // Volume operational mode
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
+		bool bSGEnabled = false;
+		int32 SGLightingMode = 0;
+		int32 SGLobeCount = 16;
+		int32 SGPrecision = 0;
+		bool bSGDiffuseEnabled = true;
+		bool bSGSpecularEnabled = true;
+		float SGHysteresis = 0.95f;
+		float SGSpecularMinRoughness = -1.0f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
 	FDDGITextureLoadContext TextureLoadContext;
 
 	TRefCountPtr<IPooledRenderTarget> ProbesIrradiance;
+	TRefCountPtr<IPooledRenderTarget> ProbesSGAmplitudes;
 	TRefCountPtr<IPooledRenderTarget> ProbesDistance;
 	TRefCountPtr<IPooledRenderTarget> ProbesOffsets;
 	TRefCountPtr<IPooledRenderTarget> ProbesStates;
 	TRefCountPtr<IPooledRenderTarget> ProbesSpace;
 
+	// --- Bake crossfade textures (transient, only populated during crossfade) ---
+	// Indexed as: [0]=Irradiance, [1]=Distance, [2]=Offsets, [3]=SGAmplitudes
+	TRefCountPtr<FRHITexture> CurrentBakeSRVs[4];
+	TRefCountPtr<FRHITexture> NextBakeSRVs[4];
+	// Separate SRV for states (copied rather than blended)
+	TRefCountPtr<FRHITexture> CurrentBakeStatesSRV;
+	float BakeBlendStartTime = 0.0f;
+	float BakeBlendDuration = 0.0f;
+	bool bBakeBlendActive = false;
 
 	// Where to start the probe update from, for updating a subset of probes
 	int ProbeIndexStart = 0;
@@ -255,6 +288,11 @@ static FIntPoint GetIrradianceTextureDimensions(FIntVector ProbeCounts)
 static FIntPoint GetDistanceTextureDimensions(FIntVector ProbeCounts)
 {
 	return Get2DProbeCount(ProbeCounts) * (FDDGIVolumeSceneProxy::FComponentData::c_NumTexelsDistance + 2);
+}
+
+static FIntPoint GetSGAmplitudeTextureDimensions(FIntVector ProbeCounts, int32 SGLobeCount)
+{
+	return FIntPoint(Get2DProbeCount(ProbeCounts).X * FMath::Clamp(SGLobeCount, 4, 32), Get2DProbeCount(ProbeCounts).Y);
 }
 
 static int32 GetProbeCount(FIntVector ProbeCounts)
@@ -309,12 +347,15 @@ protected:
 public:
 	void UpdateRenderThreadData();
 	void EnableVolumeComponent(bool enabled);
+	virtual void PostLoad() override;
 
 	static void Startup();
 	static void Shutdown();
 
 #if WITH_EDITOR
 	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	virtual void PreEditChange(FProperty* PropertyAboutToChange) override;
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 
 	/**
@@ -325,6 +366,13 @@ public:
 	// Clears the probe textures on all volumes
 	UFUNCTION(exec)
 	void DDGIClearVolumes();
+
+	// Internal bake function — reusable from both exec and editor button.
+	UDDGIBakeDataAsset* BakeCurrentState(const FString& BakeName);
+
+	// Bake the current live probe data into a UDDGIBakeDataAsset saved to <MapName>/DDGIBakes/
+	UFUNCTION(exec)
+	void DDGIBakeCurrent(const FString& BakeName);
 
 public:
 	// --- "GI Volume" properties
@@ -351,9 +399,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "GI Volume");
 	float BlendingCutoffDistance = 0.0f;
 
-	// If true, the volume will not update at runtime, and will keep the lighting values seen when the level is saved.
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Volume");
+	// Volume operational mode: Runtime (dynamic RT), Static (frozen snapshot), or Bake-Driven (asset crossfade).
+	UPROPERTY(EditAnywhere, Category = "GI Volume")
+	EDDGIVolumeMode VolumeMode = EDDGIVolumeMode::Runtime;
+
+	// Deprecated: use VolumeMode instead. Kept for serialization migration only.
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use VolumeMode instead"))
 	bool RuntimeStatic = false;
+
+	// --- Bake Assets ---
+	// Current baked data asset (bake payload/identity only; does not gate RT gather — VolumeMode does)
+	UPROPERTY(EditAnywhere, Category = "Bake Assets")
+	UDDGIBakeDataAsset* CurrentBake = nullptr;
+
+#if WITH_EDITORONLY_DATA
+	// Snapshot of CurrentBake before a property edit; used by PreEditChange/PostEditChangeProperty
+	// to detect editor-driven bake swaps and route them through SetNextBake for crossfade.
+	UDDGIBakeDataAsset* PreEditCurrentBake = nullptr;
+#endif
+
+	// Next bake to crossfade to (null = no crossfade in progress)
+	UPROPERTY(Transient, DuplicateTransient)
+	UDDGIBakeDataAsset* NextBake = nullptr;
+
+	// Crossfade duration in seconds
+	UPROPERTY(Transient)
+	float BlendDuration = 2.0f;
+
+	// Elapsed blend time in seconds
+	UPROPERTY(Transient)
+	float BlendElapsed = 0.0f;
 
 	UPROPERTY(meta=(DeprecatedProperty, DeprecationMessage = "not needed from blueprints"));
 	FVector LastOrigin_DEPRECATED;
@@ -441,12 +516,52 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GI Lighting")
 	FLightingChannels LightingChannels;
 
+	// --- "SG Lighting" properties
+
+	// Enables SG radiance metadata for this volume. SG rendering work remains disabled until SG passes are implemented and selected.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGEnabled = false;
+
+	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG directional radiance debug.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
+	int32 SGLightingMode = 0;
+
+	// Number of runtime Fibonacci SG lobes per probe. Higher counts improve directional detail at higher GPU/memory cost.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "4", ClampMax = "32", UIMin = "4", UIMax = "32"))
+	int32 SGLobeCount = 16;
+
+	// SG amplitude precision target. 0=FP16 target, 1=FP32 validation target.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	int32 SGPrecision = 0;
+
+	// Enables SG diffuse evaluation once SG lighting passes exist.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGDiffuseEnabled = true;
+
+	// Enables SG rough specular evaluation once SG lighting passes exist.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	bool bSGSpecularEnabled = true;
+
+	// Temporal hysteresis target for future SG amplitude accumulation.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	float SGHysteresis = 0.95f;
+
+	// SG specular roughness override. -1 uses material roughness from GBuffer; 0..1 forces a debug roughness value.
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
+	float SGSpecularMinRoughness = -1.0f;
+
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
 	void ClearProbeData();
 
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
 	void ToggleVolume(bool IsVolumeEnabled);
+
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	EDDGIVolumeMode GetVolumeMode() const;
+
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	void SetVolumeMode(EDDGIVolumeMode NewVolumeMode);
 
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
 	float GetUpdatePriority() const;
@@ -504,6 +619,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, meta = (AdvancedDisplay = "2", DevelopmentOnly), Category = "DDGI")
 	void SetProbesVisualization(bool IsProbesVisualized);
+
+	// Set the next bake asset to crossfade to over the specified duration.
+	// If called during an active crossfade, snaps to the current target first.
+	// Pass null to stop blending and keep the current state.
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	void SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float Duration);
 
 	FDDGIVolumeSceneProxy* SceneProxy;
 

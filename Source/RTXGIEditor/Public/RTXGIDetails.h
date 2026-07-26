@@ -31,6 +31,8 @@ private:
 
 	FReply OnClearProbes();
 
+	FReply OnBakeCurrent();
+
 	void OnSourceTypeChanged();
 
 private:
