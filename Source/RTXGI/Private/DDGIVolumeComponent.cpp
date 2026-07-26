@@ -1469,6 +1469,10 @@ void UDDGIVolumeComponent::PostLoad()
 		{
 			VolumeMode = EDDGIVolumeMode::Static;
 		}
+		else
+		{
+			VolumeMode = EDDGIVolumeMode::Runtime;
+		}
 		RuntimeStatic = false;
 	}
 }
@@ -2099,10 +2103,10 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 		return nullptr;
 	}
 
-	if (BakeName.IsEmpty())
+	FString EffectiveName = BakeName;
+	if (EffectiveName.IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: BakeName is empty"));
-		return nullptr;
+		EffectiveName = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 	}
 
 	// Read back all 5 live GPU textures — mirrors the Serialize() readback pattern
@@ -2151,7 +2155,7 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 
 	// Assemble the bake asset
 	UDDGIBakeDataAsset* BakeAsset = NewObject<UDDGIBakeDataAsset>();
-	BakeAsset->BakeName = BakeName;
+	BakeAsset->BakeName = EffectiveName;
 	BakeAsset->ProbeCounts = ProbeCounts;
 	BakeAsset->RaysPerProbe = (int32)GetNumRaysPerProbe(RaysPerProbe);
 	BakeAsset->bEnableProbeRelocation = ProbeRelocation.AutomaticProbeRelocation;
@@ -2177,7 +2181,7 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 	FString CleanMapName = FPaths::GetCleanFilename(MapName);
 	FString BakeDir = FString::Printf(TEXT("/Game/Maps/%s/DDGIBakes"), *CleanMapName);
 
-	FString AssetName = FString::Printf(TEXT("Bake_%s_%s"), *BakeName, *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+	FString AssetName = FString::Printf(TEXT("Bake_%s"), *EffectiveName);
 	FString PackagePath = FString::Printf(TEXT("%s/%s"), *BakeDir, *AssetName);
 
 	UPackage* Package = CreatePackage(*PackagePath);
@@ -2197,11 +2201,11 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 
 	if (bSaved)
 	{
-		UE_LOG(LogTemp, Log, TEXT("BakeCurrentState: bake '%s' saved to %s"), *BakeName, *PackagePath);
+		UE_LOG(LogTemp, Log, TEXT("BakeCurrentState: bake '%s' saved to %s"), *EffectiveName, *PackagePath);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: failed to save bake '%s'"), *BakeName);
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: failed to save bake '%s'"), *EffectiveName);
 	}
 
 	return bSaved ? BakeAsset : nullptr;

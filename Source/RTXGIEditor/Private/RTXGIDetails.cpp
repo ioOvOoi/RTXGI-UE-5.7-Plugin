@@ -19,7 +19,6 @@
 #include "DetailCategoryBuilder.h"
 #include "IDetailsView.h"
 
-#include "Misc/DateTime.h"
 #define LOCTEXT_NAMESPACE "RTXGIDetails"
 
 TSharedRef<IDetailCustomization> FRTXGIDetails::MakeInstance()
@@ -96,8 +95,7 @@ FReply FRTXGIDetails::OnBakeCurrent()
 		return FReply::Handled();
 	}
 
-	FString BakeName = TEXT("Current");
-	Component->BakeCurrentState(BakeName);
+	Component->BakeCurrentState("");
 
 	return FReply::Handled();
 }
