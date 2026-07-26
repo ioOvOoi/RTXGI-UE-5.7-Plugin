@@ -1196,6 +1196,9 @@ static void SaveFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixe
 	if (bSaveFormat) Ar << texturePixels.Desc.PixelFormat;
 }
 
+// fwd declared — defined later in this file
+static void CreateRHITextureFromBakePixels_RenderThread(FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& Pixels, EPixelFormat Format);
+
 // ponytail: helper used by PostEditChangeProperty and SetNextBake initial path.
 // Populates LoadContext from a bake asset and creates RHI textures synchronously.
 // Caller must call MarkRenderDynamicDataDirty() afterwards.
