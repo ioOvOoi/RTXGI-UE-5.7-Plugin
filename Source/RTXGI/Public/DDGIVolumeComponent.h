@@ -354,6 +354,7 @@ public:
 
 #if WITH_EDITOR
 	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	virtual void PreEditChange(FProperty* PropertyAboutToChange) override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 
@@ -410,6 +411,12 @@ public:
 	// Current baked data asset (bake payload/identity only; does not gate RT gather — VolumeMode does)
 	UPROPERTY(EditAnywhere, Category = "Bake Assets")
 	UDDGIBakeDataAsset* CurrentBake = nullptr;
+
+#if WITH_EDITORONLY_DATA
+	// Snapshot of CurrentBake before a property edit; used by PreEditChange/PostEditChangeProperty
+	// to detect editor-driven bake swaps and route them through SetNextBake for crossfade.
+	UDDGIBakeDataAsset* PreEditCurrentBake = nullptr;
+#endif
 
 	// Next bake to crossfade to (null = no crossfade in progress)
 	UPROPERTY(Transient, DuplicateTransient)

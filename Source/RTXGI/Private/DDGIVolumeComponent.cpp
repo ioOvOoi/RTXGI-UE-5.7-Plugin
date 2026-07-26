@@ -2034,6 +2034,16 @@ bool UDDGIVolumeComponent::CanEditChange(const FProperty* InProperty) const
 	return Super::CanEditChange(InProperty);
 }
 
+void UDDGIVolumeComponent::PreEditChange(FProperty* PropertyAboutToChange)
+{
+	Super::PreEditChange(PropertyAboutToChange);
+
+	if (PropertyAboutToChange && PropertyAboutToChange->GetFName() == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, CurrentBake))
+	{
+		PreEditCurrentBake = CurrentBake;
+	}
+}
+
 void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
@@ -2041,35 +2051,47 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 
 	if (PropertyName == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, CurrentBake))
 	{
-		if (CurrentBake != nullptr)
+		if (CurrentBake != PreEditCurrentBake)  // actual change (not just selection)
 		{
-			VolumeMode = EDDGIVolumeMode::BakeDriven;
-			// Load bake texture pixels into LoadContext
-			CurrentBake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
-			CurrentBake->Distance.ToTexturePixels(LoadContext.Distance);
-			CurrentBake->Offsets.ToTexturePixels(LoadContext.Offsets);
-			CurrentBake->States.ToTexturePixels(LoadContext.States);
-			if (CurrentBake->SGAmplitudes.Desc.Width > 0)
+			if (CurrentBake != nullptr)
 			{
-				CurrentBake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
+				if (PreEditCurrentBake != nullptr)
+				{
+					// Bake swap: route through SetNextBake for crossfade.
+					UDDGIBakeDataAsset* NewBake = CurrentBake;
+					CurrentBake = PreEditCurrentBake;  // revert so SetNextBake sees old as current
+					SetNextBake(NewBake, BlendDuration);
+				}
+				else
+				{
+					// Initial bake (no previous bake): load directly.
+					VolumeMode = EDDGIVolumeMode::BakeDriven;
+					CurrentBake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
+					CurrentBake->Distance.ToTexturePixels(LoadContext.Distance);
+					CurrentBake->Offsets.ToTexturePixels(LoadContext.Offsets);
+					CurrentBake->States.ToTexturePixels(LoadContext.States);
+					if (CurrentBake->SGAmplitudes.Desc.Width > 0)
+						CurrentBake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
+					FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Irradiance, (EPixelFormat)LoadContext.Irradiance.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Distance, (EPixelFormat)LoadContext.Distance.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Offsets, (EPixelFormat)LoadContext.Offsets.Desc.PixelFormat);
+					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.States, (EPixelFormat)LoadContext.States.Desc.PixelFormat);
+					if (LoadContext.SGAmplitudes.Desc.Width > 0)
+						CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.SGAmplitudes, (EPixelFormat)LoadContext.SGAmplitudes.Desc.PixelFormat);
+					LoadContext.ReadyForLoad = true;
+					MarkRenderDynamicDataDirty();
+				}
 			}
-			// Create RHI textures synchronously (same as serialization path)
-			FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
-			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Irradiance, (EPixelFormat)LoadContext.Irradiance.Desc.PixelFormat);
-			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Distance, (EPixelFormat)LoadContext.Distance.Desc.PixelFormat);
-			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Offsets, (EPixelFormat)LoadContext.Offsets.Desc.PixelFormat);
-			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.States, (EPixelFormat)LoadContext.States.Desc.PixelFormat);
-			if (LoadContext.SGAmplitudes.Desc.Width > 0)
-				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.SGAmplitudes, (EPixelFormat)LoadContext.SGAmplitudes.Desc.PixelFormat);
-			LoadContext.ReadyForLoad = true;
+			else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
+			{
+				// Clearing bake: drop to Runtime (never auto-Static).
+				VolumeMode = EDDGIVolumeMode::Runtime;
+				LoadContext.ReadyForLoad = false;
+				MarkRenderDynamicDataDirty();
+			}
 		}
-		else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
-		{
-			// Intentional SoT: clearing bake payload drops to Runtime (never auto-Static).
-			VolumeMode = EDDGIVolumeMode::Runtime;
-			LoadContext.ReadyForLoad = false;
-		}
-		MarkRenderDynamicDataDirty();
+		PreEditCurrentBake = nullptr;  // consumed
 		Super::PostEditChangeProperty(PropertyChangedEvent);
 		return;
 	}
