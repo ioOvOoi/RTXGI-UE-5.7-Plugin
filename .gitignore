@@ -11,5 +11,3 @@ progress.md
 .slim/worktrees/
 .slim/worktrees.json
 # END oh-my-opencode-slim worktrees
-*.pyc
-__pycache__/

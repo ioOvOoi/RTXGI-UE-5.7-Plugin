@@ -50,7 +50,7 @@ void FRTXGIDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 			SNew(SButton)
 			.HAlign(HAlign_Center)
 			.OnClicked(this, &FRTXGIDetails::OnClearProbes)
-			[ SNew(STextBlock).Text(LOCTEXT("ClearProbes", "Clear Probes")) ]
+			[ SNew(STextBlock).Text(FText::FromString("Clear Probes")) ]
 		];
 
 	DetailLayout.EditCategory("GI Volume")
@@ -60,7 +60,7 @@ void FRTXGIDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 			SNew(SButton)
 			.HAlign(HAlign_Center)
 			.OnClicked(this, &FRTXGIDetails::OnBakeCurrent)
-			[ SNew(STextBlock).Text(LOCTEXT("BakeCurrentState", "Bake Current State")) ]
+			[ SNew(STextBlock).Text(FText::FromString("Bake Current State")) ]
 		];
 }
 
