@@ -4,6 +4,7 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Language: zh-Hans\n"
 
+#. EDDGIVolumeMode enum
 msgctxt "EDDGIVolumeMode,Runtime"
 msgid "Runtime (Dynamic RT)"
 msgstr "运行时（动态 RT）"
@@ -15,3 +16,144 @@ msgstr "静态（冻结快照）"
 msgctxt "EDDGIVolumeMode,BakeDriven"
 msgid "Bake-Driven (Asset Crossfade)"
 msgstr "烘焙驱动（资产交叉渐变）"
+
+#. GI Volume
+msgctxt "UObject,Enable Volume"
+msgid "Enable Volume"
+msgstr "启用体积"
+
+msgctxt "UObject,Volume Mode"
+msgid "Volume Mode"
+msgstr "体积模式"
+
+msgctxt "UObject,Update Priority"
+msgid "Update Priority"
+msgstr "更新优先级"
+
+msgctxt "UObject,Lighting Priority"
+msgid "Lighting Priority"
+msgstr "光照优先级"
+
+msgctxt "UObject,Blending Distance"
+msgid "Blending Distance"
+msgstr "混合距离"
+
+msgctxt "UObject,Blending Cutoff Distance"
+msgid "Blending Cutoff Distance"
+msgstr "混合截断距离"
+
+#. Bake Assets
+msgctxt "UObject,Current Bake"
+msgid "Current Bake"
+msgstr "当前烘焙"
+
+msgctxt "UObject,Blend Duration"
+msgid "Blend Duration"
+msgstr "混合时长"
+
+#. GI Probes
+msgctxt "UObject,Rays Per Probe"
+msgid "Rays Per Probe"
+msgstr "每探针射线数"
+
+msgctxt "UObject,Probe Counts"
+msgid "Probe Counts"
+msgstr "探针数量"
+
+msgctxt "UObject,Probe Max Ray Distance"
+msgid "Probe Max Ray Distance"
+msgstr "探针最大射线距离"
+
+msgctxt "UObject,Probe History Weight"
+msgid "Probe History Weight"
+msgstr "探针历史权重"
+
+msgctxt "UObject,Probe Relocation"
+msgid "Probe Relocation"
+msgstr "探针重定位"
+
+msgctxt "UObject,Automatic Probe Relocation"
+msgid "Automatic Probe Relocation"
+msgstr "自动探针重定位"
+
+msgctxt "UObject,Probe Min Frontface Distance"
+msgid "Probe Min Frontface Distance"
+msgstr "探针最小正面距离"
+
+msgctxt "UObject,Probe Backface Threshold"
+msgid "Probe Backface Threshold"
+msgstr "探针背面阈值"
+
+msgctxt "UObject,Scroll Probes Infinitely"
+msgid "Scroll Probes Infinitely"
+msgstr "无限滚动探针"
+
+msgctxt "UObject,Visualize Probes"
+msgid "Visualize Probes"
+msgstr "可视化探针"
+
+msgctxt "UObject,Probe Distance Exponent"
+msgid "Probe Distance Exponent"
+msgstr "探针距离指数"
+
+msgctxt "UObject,Probe Irradiance Encoding Gamma"
+msgid "Probe Irradiance Encoding Gamma"
+msgstr "探针辐照度编码伽马"
+
+msgctxt "UObject,Probe Change Threshold"
+msgid "Probe Change Threshold"
+msgstr "探针变化阈值"
+
+msgctxt "UObject,Probe Brightness Threshold"
+msgid "Probe Brightness Threshold"
+msgstr "探针亮度阈值"
+
+#. GI Lighting
+msgctxt "UObject,Sky Light Type On Ray Miss"
+msgid "Sky Light Type On Ray Miss"
+msgstr "射线未命中时天空光类型"
+
+msgctxt "UObject,View Bias"
+msgid "View Bias"
+msgstr "视图偏移"
+
+msgctxt "UObject,Normal Bias"
+msgid "Normal Bias"
+msgstr "法线偏移"
+
+msgctxt "UObject,Light Multiplier"
+msgid "Light Multiplier"
+msgstr "光照乘数"
+
+msgctxt "UObject,Emissive Multiplier"
+msgid "Emissive Multiplier"
+msgstr "自发光乘数"
+
+#. Bake Data Asset fields
+msgctxt "UObject,Bake Data"
+msgid "Bake Data"
+msgstr "烘焙数据"
+
+msgctxt "UObject,Bake Metadata"
+msgid "Bake Metadata"
+msgstr "烘焙元数据"
+
+msgctxt "UObject,Bake Texture"
+msgid "Bake Texture"
+msgstr "烘焙纹理"
+
+msgctxt "UObject,Bake Name"
+msgid "Bake Name"
+msgstr "烘焙名称"
+
+msgctxt "UObject,S G Lobe Count"
+msgid "S G Lobe Count"
+msgstr "SG 波瓣数"
+
+msgctxt "UObject,b Enable Probe Relocation"
+msgid "b Enable Probe Relocation"
+msgstr "启用探针重定位"
+
+msgctxt "UObject,b Enable Probe Scrolling"
+msgid "b Enable Probe Scrolling"
+msgstr "启用探针滚动"

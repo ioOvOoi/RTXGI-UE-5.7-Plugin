@@ -314,15 +314,15 @@ struct FProbeRelocation
 	GENERATED_USTRUCT_BODY()
 
 	// If true, probes will attempt to relocate within their cell to leave geometry.
-	UPROPERTY(EditAnywhere, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Automatic Probe Relocation"))
 	bool AutomaticProbeRelocation = true;
 
 	// Probe relocation moves probes that see front facing triangles closer than this value.
-	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe Min Frontface Distance", ClampMin = "0"))
 	float ProbeMinFrontfaceDistance = 10.0f;
 
 	// Probe relocation and state classifier assume probes with more than this ratio of backface hits are inside of geometry.
-	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (ClampMin = "0", ClampMax = "1"));
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe Backface Threshold", ClampMin = "0", ClampMax = "1"))
 	float ProbeBackfaceThreshold = 0.25f;
 };
 
@@ -377,29 +377,29 @@ public:
 	// --- "GI Volume" properties
 
 	// If true, the volume will be a candidate to be updated and render indirect light into the scene (if also in the view frustum).
-	UPROPERTY(EditAnywhere, Category = "GI Volume");
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Enable Volume"))
 	bool EnableVolume = true;
 
 	// A priority value for scheduling updates to this volume's probes. Volumes with higher priority values get updated more often. Weighted round robin updating.
-	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (ClampMin = "0.0001", ClampMax = "100.0"));
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Update Priority", ClampMin = "0.0001", ClampMax = "100.0"))
 	float UpdatePriority = 1.0f;
 
 	// A priority value used to select volumes when applying lighting. The volume with the lowest priority value is selected.
 	// If volumes have the same priority, then volumes are selected based on probe density. The highest density volume is selected.
-	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (ClampMin = "0", ClampMax = "10"));
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Lighting Priority", ClampMin = "0", ClampMax = "10"))
 	int32 LightingPriority = 0;
 
 	// The distance in world units that this volume blends to a volume it overlaps, or fades out.
-	UPROPERTY(EditAnywhere, Category = "GI Volume");
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Blending Distance"))
 	float BlendingDistance = 20.0f;
 
 	// The distance from the edge of a volume at which it has zero weighting (turns black or yields to an encompassing volume). Useful if you don't want a linear fade all the way to the edge, which can be useful for scrolling volumes, hiding probes that haven't converged yet.
 	// Volume Blend Distance begins at this distance from the edge.
-	UPROPERTY(EditAnywhere, Category = "GI Volume");
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Blending Cutoff Distance"))
 	float BlendingCutoffDistance = 0.0f;
 
 	// Volume operational mode: Runtime (dynamic RT), Static (frozen snapshot), or Bake-Driven (asset crossfade).
-	UPROPERTY(EditAnywhere, Category = "GI Volume")
+	UPROPERTY(EditAnywhere, Category = "GI Volume", meta = (DisplayName = "Volume Mode"))
 	EDDGIVolumeMode VolumeMode = EDDGIVolumeMode::Runtime;
 
 	// Deprecated: use VolumeMode instead. Kept for serialization migration only.
@@ -408,7 +408,7 @@ public:
 
 	// --- Bake Assets ---
 	// Current baked data asset (bake payload/identity only; does not gate RT gather — VolumeMode does)
-	UPROPERTY(EditAnywhere, Category = "Bake Assets")
+	UPROPERTY(EditAnywhere, Category = "Bake Assets", meta = (DisplayName = "Current Bake"))
 	UDDGIBakeDataAsset* CurrentBake = nullptr;
 
 	// Next bake to crossfade to (null = no crossfade in progress)
@@ -429,75 +429,75 @@ public:
 	// --- "GI Probes" properties
 
 	// Number of rays shot for each probe when updating probe data.
-	UPROPERTY(EditAnywhere, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Rays Per Probe"))
 	EDDGIRaysPerProbe RaysPerProbe = EDDGIRaysPerProbe::n288;
 
 	// Number of probes on each axis.
-	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (ClampMin = "1"));
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe Counts", ClampMin = "1"))
 	FIntVector ProbeCounts = FIntVector(8, 8, 8);
 
 	// Maximum distance a probe ray may travel. Shortening this can increase performance. If you shorten it too much, it can miss geometry.
-	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe Max Ray Distance", ClampMin = "0"))
 	float ProbeMaxRayDistance = 100000.0f;
 
 	// Controls the influence of new rays when updating each probe. Values towards 1 will keep history longer, while values towards 0 will be more responsive to current values.
-	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (ClampMin = "0", ClampMax = "1"));
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe History Weight", ClampMin = "0", ClampMax = "1"))
 	float ProbeHistoryWeight = 0.97f;
 
 	// Probes relocation.
-	UPROPERTY(EditAnywhere, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Probe Relocation"))
 	FProbeRelocation ProbeRelocation;
 
 	// If true, probes will keep their same position in world space as the volume moves around. Useful for moving volumes to have more temporally stable probes.
-	UPROPERTY(EditAnywhere, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Scroll Probes Infinitely"))
 	bool ScrollProbesInfinitely = false;
 
 	// Toggle probes visualization, Probes visualization modes can be changed from Project Settings
-	UPROPERTY(EditAnywhere, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, Category = "GI Probes", meta = (DisplayName = "Visualize Probes"))
 	bool VisualizeProbes = false;
 
 	UPROPERTY(meta=(DeprecatedProperty, DeprecationMessage = "not needed from blueprints"));
 	FIntVector ProbeScrollOffset_DEPRECATED;
 
 	// Exponent for depth testing. A high value will rapidly react to depth discontinuities, but risks causing banding.
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes", meta = (DisplayName = "Probe Distance Exponent"))
 	float probeDistanceExponent = 50.f;
 
 	// Irradiance blending happens in post-tonemap space
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes", meta = (DisplayName = "Probe Irradiance Encoding Gamma"))
 	float probeIrradianceEncodingGamma = 5.f;
 
 	// A threshold ratio used during probe radiance blending that determines if a large lighting change has happened.
 	// If the max color component difference is larger than this threshold, the hysteresis will be reduced.
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes", meta = (DisplayName = "Probe Change Threshold"))
 	float probeChangeThreshold = 0.2f;
 
 	// A threshold value used during probe radiance blending that determines the maximum allowed difference in brightness
 	// between the previous and current irradiance values. This prevents impulses from drastically changing a
 	// texel's irradiance in a single update cycle.
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes");
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Probes", meta = (DisplayName = "Probe Brightness Threshold"))
 	float probeBrightnessThreshold = 2.0f;
 
 	// --- "GI Lighting" properties
 
 	// What type of skylight should contribute to GI
-	UPROPERTY(EditAnywhere, Category = "GI Lighting");
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (DisplayName = "Sky Light Type On Ray Miss"))
 	EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 
 	// Bias values for Indirect Lighting
-	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (DisplayName = "View Bias", ClampMin = "0"))
 	float ViewBias = 40.0f;
 
 	// Bias values for Indirect Lighting
-	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (DisplayName = "Normal Bias", ClampMin = "0"))
 	float NormalBias = 10.0f;
 
 	// Artificially modifies the amount of lighting given by this volume. Note that this multiplier affects emissive lighting.
-	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (DisplayName = "Light Multiplier", ClampMin = "0"))
 	float LightMultiplier = 1.0f;
 
 	// Artificially modifies emissive lighting contribution
-	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0"));
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (DisplayName = "Emissive Multiplier", ClampMin = "0"))
 	float EmissiveMultiplier = 1.0f;
 
 	// Multiplier to compensate for irradiance clipping that might happen in 10-bit mode (use smaller values for higher irradiance).
@@ -506,41 +506,41 @@ public:
 	float IrradianceScalar = 1.0f;
 
 	// Objects with overlapping channel flags will receive lighting from this volume
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GI Lighting")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GI Lighting", meta = (DisplayName = "Lighting Channels"))
 	FLightingChannels LightingChannels;
 
 	// --- "SG Lighting" properties
 
 	// Enables SG radiance metadata for this volume. SG rendering work remains disabled until SG passes are implemented and selected.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Enabled"))
 	bool bSGEnabled = false;
 
 	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG directional radiance debug.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Lighting Mode", ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
 	int32 SGLightingMode = 0;
 
 	// Number of runtime Fibonacci SG lobes per probe. Higher counts improve directional detail at higher GPU/memory cost.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "4", ClampMax = "32", UIMin = "4", UIMax = "32"))
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Lobe Count", ClampMin = "4", ClampMax = "32", UIMin = "4", UIMax = "32"))
 	int32 SGLobeCount = 16;
 
 	// SG amplitude precision target. 0=FP16 target, 1=FP32 validation target.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Precision", ClampMin = "0", ClampMax = "1"))
 	int32 SGPrecision = 0;
 
 	// Enables SG diffuse evaluation once SG lighting passes exist.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Diffuse Enabled"))
 	bool bSGDiffuseEnabled = true;
 
 	// Enables SG rough specular evaluation once SG lighting passes exist.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Specular Enabled"))
 	bool bSGSpecularEnabled = true;
 
 	// Temporal hysteresis target for future SG amplitude accumulation.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Hysteresis", ClampMin = "0", ClampMax = "1"))
 	float SGHysteresis = 0.95f;
 
 	// SG specular roughness override. -1 uses material roughness from GBuffer; 0..1 forces a debug roughness value.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
+	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (DisplayName = "SG Specular Min Roughness", ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
 	float SGSpecularMinRoughness = -1.0f;
 
 	// Blueprint Nodes
