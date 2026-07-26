@@ -2044,13 +2044,17 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 		if (CurrentBake != nullptr)
 		{
 			VolumeMode = EDDGIVolumeMode::BakeDriven;
+			// Load bake textures into proxy so editor preview works
+			SetNextBake(CurrentBake, 0);
 		}
 		else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
 		{
 			// Intentional SoT: clearing bake payload drops to Runtime (never auto-Static).
 			VolumeMode = EDDGIVolumeMode::Runtime;
+			SetNextBake(nullptr, 0);
 		}
-		bNeedsDirty = true;
+		Super::PostEditChangeProperty(PropertyChangedEvent);
+		return; // SetNextBake already marks dirty
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, VolumeMode))
 	{
