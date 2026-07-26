@@ -1,19 +1,13 @@
 # RTXGI Editor Chinese (Simplified) Translation
-#
-# To use: In UE Editor → Localization Dashboard → Add target "RTXGIEditor"
-# → Gather Text → Import this .po file → Compile Texts
-
 msgid ""
 msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Language: zh-Hans\n"
 
-#. Clear Probes button label
 msgctxt "RTXGIDetails,ClearProbes"
 msgid "Clear Probes"
 msgstr "清除探针"
 
-#. Bake Current State button label
 msgctxt "RTXGIDetails,BakeCurrentState"
 msgid "Bake Current State"
 msgstr "烘焙当前状态"
