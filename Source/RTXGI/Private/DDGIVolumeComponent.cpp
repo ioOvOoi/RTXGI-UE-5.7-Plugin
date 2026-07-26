@@ -2133,6 +2133,8 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 	FlushRenderingCommands();
 
 	// Step 2: read the GPU texture data to CPU memory
+	// Gate on both Irradiance AND Distance — Distance drives the radiance atlas extent;
+	// a failed Distance readback produces garbage that crashes BakeBlendCS (check() on extent mismatch).
 	bool bReadbackOk = false;
 	ENQUEUE_RENDER_COMMAND(DDGIBakeStep2)(
 		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackOk](FRHICommandListImmediate& RHICmdList)

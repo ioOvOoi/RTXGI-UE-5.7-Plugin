@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Compile .po files to UE .locres binary format.
-Usage: python compile_locres.py
-Generates .locres next to each .po file.
+Usage: python Scripts/compile_locres.py
+Generates .locres under Content/Localization/<TargetName>/<locale>/
 """
 import struct
 import os
+import re
 import zlib
+
 
 def read_po(path):
     entries = {}
@@ -24,6 +26,7 @@ def read_po(path):
                 ctx = msgid = msgstr = None
     return entries
 
+
 def write_fstring(f, s):
     """Write UE FString (int32 len, UTF-16LE chars, null terminator)."""
     encoded = s.encode('utf-16-le')
@@ -31,30 +34,41 @@ def write_fstring(f, s):
     f.write(encoded)
     f.write(b'\x00\x00')
 
+
 def write_locres(path, entries):
     sorted_entries = sorted(entries.items(), key=lambda x: x[0][0] + x[0][1])
     with open(path, 'wb') as f:
-        # Header
         f.write(struct.pack('<B', 0x0E))        # Magic
         f.write(struct.pack('<I', 1))            # Version
-        f.write(struct.pack('<I', 1))            # StringTableCount = 1
-        # StringTable name
+        f.write(struct.pack('<I', 1))            # StringTableCount
         write_fstring(f, 'RTXGI')
-        # Entry count
         f.write(struct.pack('<I', len(sorted_entries)))
-        # Entries
         for (ctx, src), dst in sorted_entries:
             key = f'{ctx}\x00{src}'
             write_fstring(f, key)
             f.write(struct.pack('<I', zlib.crc32(src.encode('utf-8')) & 0xFFFFFFFF))
             write_fstring(f, dst)
 
-base = os.path.dirname(os.path.abspath(__file__))
-for fname in os.listdir(base):
-    if fname.endswith('.po'):
-        po_path = os.path.join(base, fname)
-        locres_path = po_path.rsplit('.', 1)[0] + '.locres'
+
+def main():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    loc_dir = os.path.join(root, 'Localization')
+    for fname in os.listdir(loc_dir):
+        if not fname.endswith('.po'):
+            continue
+        m = re.match(r'^([\w]+)\.([\w-]+)\.po$', fname)
+        if not m:
+            continue
+        target, locale = m.group(1), m.group(2)
+        po_path = os.path.join(loc_dir, fname)
+        out_dir = os.path.join(root, 'Content', 'Localization', target, locale)
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f'{target}.locres')
         entries = read_po(po_path)
         if entries:
-            write_locres(locres_path, entries)
-            print(f'{fname} -> {os.path.basename(locres_path)} ({len(entries)} entries)')
+            write_locres(out_path, entries)
+            print(f'{fname} -> Content/Localization/{target}/{locale}/{target}.locres ({len(entries)} entries)')
+
+
+if __name__ == '__main__':
+    main()
