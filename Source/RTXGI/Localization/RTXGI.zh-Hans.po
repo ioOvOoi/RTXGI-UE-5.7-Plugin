@@ -1,0 +1,21 @@
+# RTXGI Chinese (Simplified) Translation
+#
+# EDDGIVolumeMode enum DisplayName localization
+# Namespace: UENUM auto-generated (usually module name)
+
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh-Hans\n"
+
+#. EDDGIVolumeMode::Runtime display name
+msgid "Runtime (Dynamic RT)"
+msgstr "运行时（动态 RT）"
+
+#. EDDGIVolumeMode::Static display name
+msgid "Static (Frozen Snapshot)"
+msgstr "静态（冻结快照）"
+
+#. EDDGIVolumeMode::BakeDriven display name
+msgid "Bake-Driven (Asset Crossfade)"
+msgstr "烘焙驱动（资产交叉渐变）"
