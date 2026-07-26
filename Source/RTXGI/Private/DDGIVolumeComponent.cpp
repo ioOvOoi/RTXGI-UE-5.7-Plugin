@@ -2044,7 +2044,7 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 		if (CurrentBake != nullptr)
 		{
 			VolumeMode = EDDGIVolumeMode::BakeDriven;
-			// Load bake textures into LoadContext (proxy may not exist yet in editor)
+			// Load bake texture pixels into LoadContext
 			CurrentBake->Irradiance.ToTexturePixels(LoadContext.Irradiance);
 			CurrentBake->Distance.ToTexturePixels(LoadContext.Distance);
 			CurrentBake->Offsets.ToTexturePixels(LoadContext.Offsets);
@@ -2053,19 +2053,15 @@ void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& Propert
 			{
 				CurrentBake->SGAmplitudes.ToTexturePixels(LoadContext.SGAmplitudes);
 			}
-			FDDGITextureLoadContext& Ctx = LoadContext;
-			ENQUEUE_RENDER_COMMAND(DDGILoadBakeTextures)(
-				[&Ctx](FRHICommandListImmediate& RHICmdList)
-				{
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Irradiance, (EPixelFormat)Ctx.Irradiance.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Distance, (EPixelFormat)Ctx.Distance.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Offsets, (EPixelFormat)Ctx.Offsets.Desc.PixelFormat);
-					CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.States, (EPixelFormat)Ctx.States.Desc.PixelFormat);
-					if (Ctx.SGAmplitudes.Desc.Width > 0)
-						CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.SGAmplitudes, (EPixelFormat)Ctx.SGAmplitudes.Desc.PixelFormat);
-					Ctx.ReadyForLoad = true;
-				}
-			);
+			// Create RHI textures synchronously (same as serialization path)
+			FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
+			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Irradiance, (EPixelFormat)LoadContext.Irradiance.Desc.PixelFormat);
+			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Distance, (EPixelFormat)LoadContext.Distance.Desc.PixelFormat);
+			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.Offsets, (EPixelFormat)LoadContext.Offsets.Desc.PixelFormat);
+			CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.States, (EPixelFormat)LoadContext.States.Desc.PixelFormat);
+			if (LoadContext.SGAmplitudes.Desc.Width > 0)
+				CreateRHITextureFromBakePixels_RenderThread(RHICmdList, LoadContext.SGAmplitudes, (EPixelFormat)LoadContext.SGAmplitudes.Desc.PixelFormat);
+			LoadContext.ReadyForLoad = true;
 		}
 		else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
 		{
