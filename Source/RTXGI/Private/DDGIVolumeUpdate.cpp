@@ -1134,8 +1134,8 @@ void DebugShaderPlatformsDetailed()
 			// Don't update the volume if it isn't part of the current scene
 			if (proxy->OwningScene != &Scene) continue;
 
-			// Skip RT updates for non-Runtime modes during gameplay (editor always updates for preview)
-			if (View.bIsGameView && proxy->ComponentData.Mode != EDDGIVolumeMode::Runtime) continue;
+			// Skip RT updates for BakeDriven/Static — crossfade blend needs unmolested textures
+			if (proxy->ComponentData.Mode != EDDGIVolumeMode::Runtime) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;
