@@ -1135,7 +1135,7 @@ void DebugShaderPlatformsDetailed()
 			if (proxy->OwningScene != &Scene) continue;
 
 			// Don't update non-Runtime volumes during gameplay (Static or BakeDriven)
-			if (View.bIsGameView && proxy->ComponentData.Mode != EDDGIVolumeMode::Runtime) continue;
+			if (proxy->ComponentData.Mode != EDDGIVolumeMode::Runtime) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;
