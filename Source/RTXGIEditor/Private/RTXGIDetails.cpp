@@ -19,6 +19,7 @@
 #include "DetailCategoryBuilder.h"
 #include "IDetailsView.h"
 
+#include "Misc/DateTime.h"
 #define LOCTEXT_NAMESPACE "RTXGIDetails"
 
 TSharedRef<IDetailCustomization> FRTXGIDetails::MakeInstance()
@@ -52,6 +53,16 @@ void FRTXGIDetails::CustomizeDetails(IDetailLayoutBuilder& DetailLayout)
 			.OnClicked(this, &FRTXGIDetails::OnClearProbes)
 			[ SNew(STextBlock).Text(FText::FromString("Clear Probes")) ]
 		];
+
+	DetailLayout.EditCategory("GI Volume")
+		.AddCustomRow(FText::FromString("Bake Current State Row"), true)
+		.ValueContent()
+		[
+			SNew(SButton)
+			.HAlign(HAlign_Center)
+			.OnClicked(this, &FRTXGIDetails::OnBakeCurrent)
+			[ SNew(STextBlock).Text(FText::FromString("Bake Current State")) ]
+		];
 }
 
 void FRTXGIDetails::CustomizeDetails(const TSharedPtr<IDetailLayoutBuilder>& DetailBuilder)
@@ -67,6 +78,27 @@ FReply FRTXGIDetails::OnClearProbes()
 	{
 		DDGIComponent->ClearProbeData();
 	}
+	return FReply::Handled();
+}
+
+FReply FRTXGIDetails::OnBakeCurrent()
+{
+	if (!DDGIVolume.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("OnBakeCurrent: DDGIVolume is null"));
+		return FReply::Handled();
+	}
+
+	UDDGIVolumeComponent* Component = DDGIVolume->DDGIVolumeComponent;
+	if (!Component)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("OnBakeCurrent: DDGIVolumeComponent is null"));
+		return FReply::Handled();
+	}
+
+	FString BakeName = TEXT("Current");
+	Component->BakeCurrentState(BakeName);
+
 	return FReply::Handled();
 }
 

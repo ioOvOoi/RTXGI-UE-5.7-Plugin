@@ -1061,6 +1061,7 @@ struct RTXGI_API FDDGICustomVersion
 		SaveLoadProbeTexturesFmt,  // save texel format since the format can change in the project settings
 		SaveLoadProbeDataIsOptional, // Probe data is optionally stored depending on project settings
 		SaveLoadSGAmplitudes,      // save/load SG amplitude atlas alongside the four octa probe textures
+		VolumeModeEnum,            // RuntimeStatic bool replaced by EDDGIVolumeMode enum
 	};
 
 	// The GUID for this custom version number
@@ -1072,7 +1073,7 @@ private:
 const FGuid FDDGICustomVersion::GUID(0xc12f0537, 0x7346d9c5, 0x336fbba3, 0x738ab145);
 
 // Register the custom version with core
-FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::SaveLoadSGAmplitudes, TEXT("DDGIVolCompVer"));
+FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::VolumeModeEnum, TEXT("DDGIVolCompVer"));
 
 // Create a CPU accessible GPU texture and copy the provided GPU texture's contents to it
 static bool HasRequiredTexturePixels(const FDDGITexturePixels& TexturePixels)
@@ -1303,12 +1304,8 @@ if (Ar.IsSaving())
 
 if (bProbesSerialized)
 			{
-				//auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
-
 				// When we are *not* cooking and ray tracing is available, copy the DDGIVolume probe texture resources
-				// to CPU memory otherwise, write out the DDGIVolume texture resources acquired at load time
-				// Also disable copying when we are static in editor
-				//if (!Ar.IsCooking() && IsRayTracingEnabled() && proxy && (!CVarDDGIStaticInEditor || !CVarDDGIStaticInEditor->GetBool()))
+				// to CPU memory; otherwise, write out the DDGIVolume texture resources acquired at load time.
 				if (!Ar.IsCooking() && IsRayTracingEnabled() && proxy)
 				{
 					// Copy textures to CPU accessible texture resources
@@ -1457,6 +1454,25 @@ if (bProbesSerialized)
 	}
 }
 
+void UDDGIVolumeComponent::PostLoad()
+{
+	Super::PostLoad();
+
+	// One-shot migration for assets saved before VolumeModeEnum; later loads trust serialized VolumeMode.
+	if (GetLinkerCustomVersion(FDDGICustomVersion::GUID) < FDDGICustomVersion::VolumeModeEnum)
+	{
+		if (CurrentBake != nullptr)
+		{
+			VolumeMode = EDDGIVolumeMode::BakeDriven;
+		}
+		else if (RuntimeStatic)
+		{
+			VolumeMode = EDDGIVolumeMode::Static;
+		}
+		RuntimeStatic = false;
+	}
+}
+
 void UDDGIVolumeComponent::UpdateRenderThreadData()
 {
 	// Send command to the rendering thread to update the transform and other parameters
@@ -1517,8 +1533,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.IrradianceScalar = IrradianceScalar;
 		ComponentData.EmissiveMultiplier = EmissiveMultiplier;
 		ComponentData.LightingMultiplier = LightMultiplier;
-ComponentData.RuntimeStatic = RuntimeStatic;
-		ComponentData.bBakeDriven = (CurrentBake != nullptr);
+		ComponentData.Mode = VolumeMode;
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
 		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
@@ -1877,6 +1892,11 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 		{
 			UE_LOG(LogTemp, Warning, TEXT("SetNextBake: cannot crossfade — volume has no render proxy"));
 			NextBake = nullptr;
+			if (CurrentBake != nullptr)
+			{
+				VolumeMode = EDDGIVolumeMode::BakeDriven;
+				MarkRenderDynamicDataDirty();
+			}
 			return;
 		}
 
@@ -1938,6 +1958,10 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 		);
 	}
 
+	if (CurrentBake != nullptr)
+	{
+		VolumeMode = EDDGIVolumeMode::BakeDriven;
+	}
 	MarkRenderDynamicDataDirty();
 }
 
@@ -2005,6 +2029,37 @@ bool UDDGIVolumeComponent::CanEditChange(const FProperty* InProperty) const
 
 	return Super::CanEditChange(InProperty);
 }
+
+void UDDGIVolumeComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+	bool bNeedsDirty = false;
+
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, CurrentBake))
+	{
+		if (CurrentBake != nullptr)
+		{
+			VolumeMode = EDDGIVolumeMode::BakeDriven;
+		}
+		else if (VolumeMode == EDDGIVolumeMode::BakeDriven)
+		{
+			// Intentional SoT: clearing bake payload drops to Runtime (never auto-Static).
+			VolumeMode = EDDGIVolumeMode::Runtime;
+		}
+		bNeedsDirty = true;
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, VolumeMode))
+	{
+		bNeedsDirty = true;
+	}
+
+	if (bNeedsDirty)
+	{
+		MarkRenderDynamicDataDirty();
+	}
+
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
 #endif
 
 void UDDGIVolumeComponent::DDGIClearVolumes()
@@ -2027,27 +2082,27 @@ void UDDGIVolumeComponent::DDGIClearVolumes()
 #endif
 }
 
-void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
+UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeName)
 {
 #if WITH_RTXGI
-	// 6.5: Refuse bake on scrolling volumes
+	// Refuse bake on scrolling volumes
 	if (ScrollProbesInfinitely)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: scrolling volumes do not support bakes"));
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: scrolling volumes do not support bakes"));
+		return nullptr;
 	}
 
 	FDDGIVolumeSceneProxy* proxy = SceneProxy;
 	if (!proxy)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: no scene proxy"));
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: no scene proxy"));
+		return nullptr;
 	}
 
 	if (BakeName.IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: BakeName is empty"));
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: BakeName is empty"));
+		return nullptr;
 	}
 
 	// Read back all 5 live GPU textures — mirrors the Serialize() readback pattern
@@ -2074,8 +2129,6 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	FlushRenderingCommands();
 
 	// Step 2: read the GPU texture data to CPU memory
-	// Gate on both Irradiance AND Distance — Distance drives the radiance atlas extent;
-	// a failed Distance readback produces garbage that crashes BakeBlendCS (check() on extent mismatch).
 	bool bReadbackOk = false;
 	ENQUEUE_RENDER_COMMAND(DDGIBakeStep2)(
 		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackOk](FRHICommandListImmediate& RHICmdList)
@@ -2092,11 +2145,11 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 
 	if (!bReadbackOk)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: irradiance readback failed — bake aborted"));
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: irradiance readback failed — bake aborted"));
+		return nullptr;
 	}
 
-	// 6.3: Assemble the bake asset
+	// Assemble the bake asset
 	UDDGIBakeDataAsset* BakeAsset = NewObject<UDDGIBakeDataAsset>();
 	BakeAsset->BakeName = BakeName;
 	BakeAsset->ProbeCounts = ProbeCounts;
@@ -2109,7 +2162,6 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
 	BakeAsset->SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : (int32)SGLobeCount, 4, 32);
 
-	// Convert FDDGITexturePixels → FDDGIBakeTexturePayload via FromTexturePixels
 	BakeAsset->Irradiance.FromTexturePixels(Irradiance);
 	BakeAsset->Distance.FromTexturePixels(Distance);
 	BakeAsset->Offsets.FromTexturePixels(Offsets);
@@ -2119,7 +2171,7 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 		BakeAsset->SGAmplitudes.FromTexturePixels(SGAmplitudes);
 	}
 
-	// 6.4: Save the asset to <MapName>/DDGIBakes/
+	// Save the asset to <MapName>/DDGIBakes/
 	UWorld* World = GetWorld();
 	FString MapName = World ? World->GetMapName() : TEXT("Unknown");
 	FString CleanMapName = FPaths::GetCleanFilename(MapName);
@@ -2131,30 +2183,37 @@ void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
 	UPackage* Package = CreatePackage(*PackagePath);
 	if (!Package)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: failed to create package %s"), *PackagePath);
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: failed to create package %s"), *PackagePath);
+		return nullptr;
 	}
 
 	BakeAsset->Rename(*AssetName, Package, REN_None);
 	BakeAsset->SetFlags(RF_Public | RF_Standalone);
 
 	FString Filename = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
-	// UE 5.7: use FSavePackageArgs overload (the bool(Package, Asset, Flags, Filename) overload is removed)
 	FSavePackageArgs SaveArgs;
 	SaveArgs.SaveFlags = RF_Public | RF_Standalone;
 	bool bSaved = UPackage::SavePackage(Package, BakeAsset, *Filename, SaveArgs);
 
 	if (bSaved)
 	{
-		UE_LOG(LogTemp, Log, TEXT("DDGIBakeCurrent: bake '%s' saved to %s"), *BakeName, *PackagePath);
+		UE_LOG(LogTemp, Log, TEXT("BakeCurrentState: bake '%s' saved to %s"), *BakeName, *PackagePath);
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: failed to save bake '%s'"), *BakeName);
+		UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: failed to save bake '%s'"), *BakeName);
 	}
+
+	return bSaved ? BakeAsset : nullptr;
 #else
-	UE_LOG(LogTemp, Warning, TEXT("DDGIBakeCurrent: RTXGI not available"));
+	UE_LOG(LogTemp, Warning, TEXT("BakeCurrentState: RTXGI not available"));
+	return nullptr;
 #endif
+}
+
+void UDDGIVolumeComponent::DDGIBakeCurrent(const FString& BakeName)
+{
+	BakeCurrentState(BakeName);
 }
 
 void UDDGIVolumeComponent::SendRenderDynamicData_Concurrent()
@@ -2185,16 +2244,6 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 	if (SceneProxy)
 	{
 		FDDGITextureLoadContext& ComponentLoadContext = LoadContext;
-
-//		bool bStatic = RuntimeStatic;
-//#if WITH_EDITOR
-//		if (bStatic)
-//		{
-//			auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
-//			bStatic = CVarDDGIStaticInEditor && CVarDDGIStaticInEditor->GetBool();
-//		}
-//#endif
-
 		FDDGIVolumeSceneProxy* DDGIProxy = SceneProxy;
 
 		bool bProbeCountsChanged = (PrevProbeCounts != ProbeCounts);
@@ -2205,20 +2254,13 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 				// If the component has textures pending load, nothing to do here. Those are the most authoritative.
 				if (!ComponentLoadContext.ReadyForLoad)
 				{
-					// If static, just reset the ready for load state
-				/*	if (bStatic)
-					{
-						ComponentLoadContext.ReadyForLoad = true;
-						ComponentLoadContext = DDGIProxy->TextureLoadContext;
-					}*/
-
 					// If the proxy has textures pending load which haven't been serviced yet, the component should take those
 					// in case it creates another proxy.
 					if (DDGIProxy->TextureLoadContext.ReadyForLoad)
 					{
 						ComponentLoadContext = DDGIProxy->TextureLoadContext;
 					}
-// otherwise, we should copy the textures from this proxy into textures for the TextureLoadContext
+					// otherwise, we should copy the textures from this proxy into textures for the TextureLoadContext
 					// to make them survive to the next proxy for this component if one is created.
 					else
 					{
@@ -2276,6 +2318,23 @@ void UDDGIVolumeComponent::ToggleVolume(bool IsVolumeEnabled)
 {
 #if WITH_RTXGI
 	EnableVolumeComponent(IsVolumeEnabled);
+#endif
+}
+
+EDDGIVolumeMode UDDGIVolumeComponent::GetVolumeMode() const
+{
+#if WITH_RTXGI
+	return VolumeMode;
+#else
+	return EDDGIVolumeMode::Runtime;
+#endif
+}
+
+void UDDGIVolumeComponent::SetVolumeMode(EDDGIVolumeMode NewVolumeMode)
+{
+#if WITH_RTXGI
+	VolumeMode = NewVolumeMode;
+	MarkRenderDynamicDataDirty();
 #endif
 }
 

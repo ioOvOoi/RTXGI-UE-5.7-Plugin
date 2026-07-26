@@ -57,6 +57,14 @@ enum class EDDGIRaysPerProbe
 	n1008 = 1008 UMETA(DisplayName = "1008")
 };
 
+UENUM(BlueprintType)
+enum class EDDGIVolumeMode : uint8
+{
+	Runtime     UMETA(DisplayName = "Runtime (Dynamic RT)"),
+	Static      UMETA(DisplayName = "Static (Frozen Snapshot)"),
+	BakeDriven  UMETA(DisplayName = "Bake-Driven (Asset Crossfade)"),
+};
+
 UENUM()
 enum class EDDGISkyLightType
 {
@@ -199,8 +207,7 @@ public:
 		float IrradianceScalar = 1.0f;
 		float EmissiveMultiplier = 1.0f;
 		float LightingMultiplier = 1.0f;
-		bool RuntimeStatic = false; // If true, does not update during gameplay, only during editor.
-		bool bBakeDriven = false; // True when a bake asset drives this volume (skips RT updates, runs BakeBlendCS)
+		EDDGIVolumeMode Mode = EDDGIVolumeMode::Runtime; // Volume operational mode
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 		bool bSGEnabled = false;
 		int32 SGLightingMode = 0;
@@ -340,12 +347,14 @@ protected:
 public:
 	void UpdateRenderThreadData();
 	void EnableVolumeComponent(bool enabled);
+	virtual void PostLoad() override;
 
 	static void Startup();
 	static void Shutdown();
 
 #if WITH_EDITOR
 	virtual bool CanEditChange(const FProperty* InProperty) const override;
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 
 	/**
@@ -356,6 +365,9 @@ public:
 	// Clears the probe textures on all volumes
 	UFUNCTION(exec)
 	void DDGIClearVolumes();
+
+	// Internal bake function — reusable from both exec and editor button.
+	UDDGIBakeDataAsset* BakeCurrentState(const FString& BakeName);
 
 	// Bake the current live probe data into a UDDGIBakeDataAsset saved to <MapName>/DDGIBakes/
 	UFUNCTION(exec)
@@ -386,12 +398,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "GI Volume");
 	float BlendingCutoffDistance = 0.0f;
 
-	// If true, the volume will not update at runtime, and will keep the lighting values seen when the level is saved.
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = "GI Volume");
+	// Volume operational mode: Runtime (dynamic RT), Static (frozen snapshot), or Bake-Driven (asset crossfade).
+	UPROPERTY(EditAnywhere, Category = "GI Volume")
+	EDDGIVolumeMode VolumeMode = EDDGIVolumeMode::Runtime;
+
+	// Deprecated: use VolumeMode instead. Kept for serialization migration only.
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage = "Use VolumeMode instead"))
 	bool RuntimeStatic = false;
 
 	// --- Bake Assets ---
-	// Current baked data asset driving this volume (null = RT-driven or RuntimeStatic snapshot)
+	// Current baked data asset (bake payload/identity only; does not gate RT gather — VolumeMode does)
 	UPROPERTY(EditAnywhere, Category = "Bake Assets")
 	UDDGIBakeDataAsset* CurrentBake = nullptr;
 
@@ -533,6 +549,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
 	void ToggleVolume(bool IsVolumeEnabled);
+
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	EDDGIVolumeMode GetVolumeMode() const;
+
+	UFUNCTION(BlueprintCallable, Category = "DDGI")
+	void SetVolumeMode(EDDGIVolumeMode NewVolumeMode);
 
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
 	float GetUpdatePriority() const;

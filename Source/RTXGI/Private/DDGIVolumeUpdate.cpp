@@ -1119,7 +1119,7 @@ void DebugShaderPlatformsDetailed()
 		check(IsInRenderingThread() || IsInParallelRenderingThread());
 
 		// 4.4 + 4.5: Advance bake crossfades before the RT update loop.
-		// Bake-driven volumes are skipped by the gather loop below (bBakeDriven gate),
+		// Non-Runtime volumes are skipped by the gather loop below (Mode gate),
 		// so their crossfade must be advanced here.
 		DDGIBakeBlendPerFrame_RenderThread(GraphBuilder);
 
@@ -1134,8 +1134,8 @@ void DebugShaderPlatformsDetailed()
 			// Don't update the volume if it isn't part of the current scene
 			if (proxy->OwningScene != &Scene) continue;
 
-			// Don't update static runtime volumes or bake-driven volumes during gameplay
-			if (View.bIsGameView && (proxy->ComponentData.RuntimeStatic || proxy->ComponentData.bBakeDriven)) continue;
+			// Don't update non-Runtime volumes during gameplay (Static or BakeDriven)
+			if (View.bIsGameView && proxy->ComponentData.Mode != EDDGIVolumeMode::Runtime) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;
