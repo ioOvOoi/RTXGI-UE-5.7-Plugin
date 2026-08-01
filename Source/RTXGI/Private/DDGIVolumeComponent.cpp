@@ -68,8 +68,7 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityIntensity(
 static TAutoConsoleVariable<int32> CVarSkyVisibilityAffectDDGI(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.AffectDDGI"),
 	0,
-	TEXT("1=用 GBufferAO 再乘 DDGI 间接光；0=默认只写 AO 供 SkyLight 遮蔽，不改 DDGI 亮度。
-"),
+	TEXT("1=modulate DDGI by AO; 0=default AO only for SkyLight, do not darken DDGI.\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarSkyVisibilityResolutionScale(
@@ -107,8 +106,7 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
 static TAutoConsoleVariable<float> CVarSkyVisibilityLeak(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"),
 	0.0f,
-	TEXT("封闭区 GBufferAO 下限。0=完全挡天光(默认)；>0 封闭区仍透一点天光。见天像素仍为 1，且 min 写入不提亮。
-"),
+	TEXT("Closed-area GBufferAO floor. 0=block skylight (default); >0 allows residual. Open stays 1; min never brightens.\n"),
 	ECVF_RenderThreadSafe);
 
 // 探针 Ray Miss 时天空贡献倍率（Raster SH / Cubemap）
