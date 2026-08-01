@@ -511,7 +511,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
 	float SkyVisibilityIntensity = 1.0f;
 
-	// 遮挡处仍保留的天光开阔度下限，避免环境过黑（类 Lumen 可调漏光）
+	// 本 volume 遮挡处天光开阔度下限；与全局 Leak 取 max（densest 赢时用该 volume 值写入 GBufferAO）
 	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
 	float SkyLightLeak = 0.2f;
 

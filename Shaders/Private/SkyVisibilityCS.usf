@@ -25,7 +25,7 @@ int                 SampleCount;
 float               SoftNear;
 float               SoftFar;
 float               WorldUpBias;
-float               SoftLeak;
+float               SoftLeakFloor;
 int                 NumVolumes;
 
 Texture2D<float4>   Volume_0_ProbeDistance;
@@ -39,6 +39,7 @@ int3                Volume_0_ProbeGridCounts;
 int                 Volume_0_ProbeNumDistanceTexels;
 int3                Volume_0_ProbeScrollOffsets;
 float               Volume_0_SkyVisibilityIntensity;
+float               Volume_0_SkyLightLeak;
 
 Texture2D<float4>   Volume_1_ProbeDistance;
 Texture2D<float4>   Volume_1_ProbeOffsets;
@@ -51,6 +52,7 @@ int3                Volume_1_ProbeGridCounts;
 int                 Volume_1_ProbeNumDistanceTexels;
 int3                Volume_1_ProbeScrollOffsets;
 float               Volume_1_SkyVisibilityIntensity;
+float               Volume_1_SkyLightLeak;
 
 Texture2D<float4>   Volume_2_ProbeDistance;
 Texture2D<float4>   Volume_2_ProbeOffsets;
@@ -63,6 +65,7 @@ int3                Volume_2_ProbeGridCounts;
 int                 Volume_2_ProbeNumDistanceTexels;
 int3                Volume_2_ProbeScrollOffsets;
 float               Volume_2_SkyVisibilityIntensity;
+float               Volume_2_SkyLightLeak;
 
 Texture2D<float4>   Volume_3_ProbeDistance;
 Texture2D<float4>   Volume_3_ProbeOffsets;
@@ -75,6 +78,7 @@ int3                Volume_3_ProbeGridCounts;
 int                 Volume_3_ProbeNumDistanceTexels;
 int3                Volume_3_ProbeScrollOffsets;
 float               Volume_3_SkyVisibilityIntensity;
+float               Volume_3_SkyLightLeak;
 
 RWTexture2D<float>  SkyVisOutput;
 
@@ -97,7 +101,8 @@ float EvalVolumeSkyVisibility(
 	int3 ProbeGridCounts,
 	int ProbeNumDistanceTexels,
 	int3 ProbeScrollOffsets,
-	float Intensity)
+	float Intensity,
+	float VolumeLeak)
 {
 	DDGIVolumeDescGPU Volume;
 	Volume.origin = Position;
@@ -123,8 +128,9 @@ float EvalVolumeSkyVisibility(
 #endif
 
 	float skyVis = DDGIGetVolumeSkyVisibility(WorldPosition, Normal, Volume, Resources, SampleCount, SoftNear, SoftFar, WorldUpBias);
-	// Intensity 压暗强度；SoftLeak 为遮挡处 openness 下限（天空光泄露）
-	float openness = lerp(SoftLeak, 1.0f, skyVis);
+	// densest volume 赢时用该 volume 的 SkyLightLeak；全局 SoftLeakFloor 作下限
+	float leak = max(SoftLeakFloor, saturate(VolumeLeak));
+	float openness = lerp(leak, 1.0f, skyVis);
 	return lerp(1.0f, openness, Intensity);
 }
 
@@ -181,7 +187,8 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 				Volume_##i##_ProbeDistance, Volume_##i##_ProbeOffsets, Volume_##i##_ProbeStates, \
 				Volume_##i##_Position, Volume_##i##_Rotation, Volume_##i##_ProbeGridSpacing, \
 				Volume_##i##_ProbeGridCounts, Volume_##i##_ProbeNumDistanceTexels, \
-				Volume_##i##_ProbeScrollOffsets, Volume_##i##_SkyVisibilityIntensity); \
+				Volume_##i##_ProbeScrollOffsets, Volume_##i##_SkyVisibilityIntensity, \
+				Volume_##i##_SkyLightLeak); \
 			bFound = true; \
 		} \
 	}

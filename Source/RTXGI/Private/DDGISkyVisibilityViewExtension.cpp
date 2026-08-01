@@ -92,7 +92,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(float, SoftNear)
 	SHADER_PARAMETER(float, SoftFar)
 	SHADER_PARAMETER(float, WorldUpBias)
-	SHADER_PARAMETER(float, SoftLeak)
+	SHADER_PARAMETER(float, SoftLeakFloor)
 	SHADER_PARAMETER(int32, NumVolumes)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_0_ProbeDistance)
@@ -106,6 +106,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(int32, Volume_0_ProbeNumDistanceTexels)
 	SHADER_PARAMETER(FIntVector, Volume_0_ProbeScrollOffsets)
 	SHADER_PARAMETER(float, Volume_0_SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, Volume_0_SkyLightLeak)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_1_ProbeDistance)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_1_ProbeOffsets)
@@ -118,6 +119,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(int32, Volume_1_ProbeNumDistanceTexels)
 	SHADER_PARAMETER(FIntVector, Volume_1_ProbeScrollOffsets)
 	SHADER_PARAMETER(float, Volume_1_SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, Volume_1_SkyLightLeak)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_2_ProbeDistance)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_2_ProbeOffsets)
@@ -130,6 +132,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(int32, Volume_2_ProbeNumDistanceTexels)
 	SHADER_PARAMETER(FIntVector, Volume_2_ProbeScrollOffsets)
 	SHADER_PARAMETER(float, Volume_2_SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, Volume_2_SkyLightLeak)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_3_ProbeDistance)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_3_ProbeOffsets)
@@ -142,6 +145,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(int32, Volume_3_ProbeNumDistanceTexels)
 	SHADER_PARAMETER(FIntVector, Volume_3_ProbeScrollOffsets)
 	SHADER_PARAMETER(float, Volume_3_SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, Volume_3_SkyLightLeak)
 
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, SkyVisOutput)
 END_SHADER_PARAMETER_STRUCT()
@@ -337,13 +341,8 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		PassParameters->SoftNear = GetSoftNear();
 		PassParameters->SoftFar = FMath::Max(GetSoftFar(), GetSoftNear() + 1.0f);
 		PassParameters->WorldUpBias = GetWorldUpBias();
-		// 全局 Leak 与各 volume SkyLightLeak 取 max，避免过黑
-		float Leak = GetSoftLeak();
-		for (const FProxyEntry& E : Volumes)
-		{
-			Leak = FMath::Max(Leak, FMath::Clamp(E.Proxy->ComponentData.SkyLightLeak, 0.0f, 1.0f));
-		}
-		PassParameters->SoftLeak = Leak;
+		// 全局泄露地板；per-volume SkyLightLeak 在 shader 里 max(Floor, VolLeak)
+		PassParameters->SoftLeakFloor = GetSoftLeak();
 		PassParameters->NumVolumes = Volumes.Num();
 		PassParameters->SkyVisOutput = GraphBuilder.CreateUAV(SkyVisRT);
 
@@ -378,6 +377,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 				PassParameters->Volume_##N##_ProbeNumDistanceTexels = FDDGIVolumeSceneProxy::FComponentData::c_NumTexelsDistance; \
 				PassParameters->Volume_##N##_ProbeScrollOffsets = Proxy->ComponentData.ProbeScrollOffsets; \
 				PassParameters->Volume_##N##_SkyVisibilityIntensity = Proxy->ComponentData.SkyVisibilityIntensity; \
+				PassParameters->Volume_##N##_SkyLightLeak = FMath::Clamp(Proxy->ComponentData.SkyLightLeak, 0.0f, 1.0f); \
 			}
 			BIND_VOLUME_SLOT(0)
 			BIND_VOLUME_SLOT(1)
@@ -407,6 +407,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 				PassParameters->Volume_##N##_ProbeNumDistanceTexels = 1; \
 				PassParameters->Volume_##N##_ProbeScrollOffsets = FIntVector::ZeroValue; \
 				PassParameters->Volume_##N##_SkyVisibilityIntensity = 0.0f; \
+				PassParameters->Volume_##N##_SkyLightLeak = 0.0f; \
 			}
 			ZERO_SLOT(0) ZERO_SLOT(1) ZERO_SLOT(2) ZERO_SLOT(3)
 #undef ZERO_SLOT

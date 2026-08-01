@@ -98,7 +98,7 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
 static TAutoConsoleVariable<float> CVarSkyVisibilityLeak(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"),
 	0.2f,
-	TEXT("天空光泄露 [0,1]。遮挡处 openness 下限；0=可全黑，0.2=默认略亮，1=关闭遮蔽压暗。\n"),
+	TEXT("全局天空光泄露地板 [0,1]。与 volume.SkyLightLeak 取 max 后写入 GBufferAO；0=可全黑，0.2=默认，1=不压暗。\n"),
 	ECVF_RenderThreadSafe);
 
 // 探针 Ray Miss 时天空贡献倍率（Raster SH / Cubemap）
