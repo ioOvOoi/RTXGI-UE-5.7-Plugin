@@ -1,5 +1,13 @@
 /*
-* Full-res composite: upsample intermediate skyVis and min into GBufferC.a via UAV RMW.
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* 全分辨率 composite：采样低分辨率 skyVis，min 写入 GBufferC.a（GBufferAO）。
+*
+* 为什么 min：保护材质自带 AO，只允许更暗不能更亮（与 DFAO/SSAO 合成习惯一致）。
+* 为什么 UAV RMW、禁止再绑 GBufferC SRV：同资源 SRV+UAV 未定义；用 TypedUAVLoad 读-改-写 .a。
+* 为什么必须单独全分辨率 pass：低分辨率禁止直接 scatter 写全分辨率 GBuffer。
+*
+* SkyVis_GBufferB 仅用于 DecodeShadingModelId 跳过 Unlit。
 */
 
 #include "/Engine/Public/Platform.ush"

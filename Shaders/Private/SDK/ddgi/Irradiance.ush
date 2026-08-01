@@ -241,7 +241,8 @@ float3x3 DDGIGetNormalBasis(float3 normal)
 /**
 * 半球均匀方向 i/N，朝 surfaceNormal。
 * SampleCount=1 退化为法线；否则复用 DDGISphericalFibonacci 并折叠到 +Z 半球再旋转到法线。
-* 为什么用 Fibonacci 而非 cosine-weighted：openspec design D3 / spec「半球均匀」要求均匀立体角，不是 BRDF 余弦加权。
+* 为什么用 Fibonacci 而非 cosine-weighted：需要半球上均匀立体角采样以估计「见天比例」；
+* cosine-weighted 偏向法线附近，会低估掠射方向遮挡，不适合 sky openness。
 */
 float3 DDGIGetSkyVisibilitySampleDirection(float3 surfaceNormal, int sampleIndex, int sampleCount)
 {

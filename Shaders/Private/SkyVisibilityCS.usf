@@ -1,6 +1,19 @@
 /*
-* Sky visibility compute: sample DDGI distance texture → intermediate R8 RT.
-* Composite pass RMW-writes min into GBufferC.a (no SRV+UAV on same resource).
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* 低分辨率 Sky Visibility 计算（CS）。
+*
+* 输入：SceneDepth / GBufferA(法线) / GBufferB(着色模型) / 最多 4 个 volume 的探针 distance（及 offsets/states）。
+* 输出：中间 RT（R16F）存 openness [0,1]（1=完全见天）。
+*
+* 为什么纹理叫 SkyVis_*：DeferredShadingCommon.ush 已声明 GBufferBTexture 等同名，
+* 再声明会 SM6 redefinition。绑定侧 C++ 参数名必须与这里一致。
+*
+* 算法概要：
+* 1) 重建世界位置与法线；跳过天空像素(DeviceZ==0)与 Unlit；
+* 2) densest-first：落在体积内的最密 volume 求值；
+* 3) 对 8 邻域探针 × N 半球方向采样 distance，softNear/Far 映射开阔度；
+* 4) openness = lerp(max(全局Leak, volumeLeak), 1, skyVis)，再 * volume Intensity。
 */
 
 #include "/Engine/Public/Platform.ush"
@@ -128,7 +141,8 @@ float EvalVolumeSkyVisibility(
 #endif
 
 	float skyVis = DDGIGetVolumeSkyVisibility(WorldPosition, Normal, Volume, Resources, SampleCount, SoftNear, SoftFar, WorldUpBias);
-	// densest volume 赢时用该 volume 的 SkyLightLeak；全局 SoftLeakFloor 作下限
+	// skyVis: 0=遮挡, 1=见天。leak 为遮挡区仍保留的下限（全局地板 max 本 volume）。
+	// Intensity: 0 表示本 volume 不压暗（始终 1）；1 表示完整应用 openness。
 	float leak = max(SoftLeakFloor, saturate(VolumeLeak));
 	float openness = lerp(leak, 1.0f, skyVis);
 	return lerp(1.0f, openness, Intensity);
@@ -142,7 +156,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 		return;
 	}
 
-	// Map low-res dispatch pixel → full-res GBuffer UV (center of corresponding block)
+	// 低分辨率线程映射到全分辨率 GBuffer 采样中心，避免半像素偏移。
 	float2 FullUV = (float2(DispatchThreadID.xy) + 0.5f) / float2(DispatchSize);
 	int2 FullPixel = int2(FullUV * float2(FullViewSize)) + ViewOffset;
 	float2 BufferUV = (float2(FullPixel) + 0.5f) * View.BufferSizeAndInvSize.zw;
@@ -154,7 +168,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 		return;
 	}
 
-	// Skip Unlit — GBufferB packs shading model id
+	// Unlit 无间接/天光语义，写 1（不压暗）并跳过，避免污染 UI/特效。
 	float4 GBufferB = SkyVis_GBufferB.SampleLevel(PointClampSampler, BufferUV, 0);
 	uint ShadingModelId = DecodeShadingModelId(GBufferB.a);
 	if (ShadingModelId == SHADINGMODELID_UNLIT)
@@ -173,7 +187,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 #endif
 	float3 Normal = normalize(DecodeNormal(SkyVis_GBufferA.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
 
-	// Densest-first: first containing volume wins
+	// densest-first：列表已按密度降序绑定，第一个包含像素的 volume 胜出（与 ApplyLighting 一致）。
 	float Result = 1.0f;
 	bool bFound = false;
 

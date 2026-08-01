@@ -1,3 +1,13 @@
+/*
+* Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
+*
+* NVIDIA CORPORATION and its licensors retain all intellectual property
+* and proprietary rights in and to this software, related documentation
+* and any modifications thereto.  Any use, reproduction, disclosure or
+* distribution of this software and related documentation without an express
+* license agreement from NVIDIA CORPORATION is strictly prohibited.
+*/
+
 #include "DDGISkyVisibilityViewExtension.h"
 #include "DDGIVolumeComponent.h"
 #include "DDGIUtilities.h"
@@ -16,9 +26,14 @@
 
 DECLARE_GPU_STAT_NAMED(RTXGI_SkyVisibility, TEXT("RTXGI Sky Visibility"));
 
+// CVar 在 DDGIVolumeComponent.cpp 用 TAutoConsoleVariable 唯一注册（对齐原 DDGI）。
+// 本文件只 FindConsoleVariable 读取；禁止第二处再 TAuto 同名。
+
 namespace
 {
-	// ponytail: 固定 4 槽位绑 SRV，改上限需同步 usf/参数结构；超过则按密度截断。若常 >4 再升到 c_RTXGI_DDGI_MAX_SHADING_VOLUMES
+	// 单 pass 最多绑几个 volume 的 SRV。
+	// 为什么不用 c_RTXGI_DDGI_MAX_SHADING_VOLUMES(12)：usf 手写 Volume_0..N 参数；
+	// 中远距信号低频，4 个 densest 通常够用。改大必须同步 usf 与参数结构。
 	static constexpr int32 GMaxSkyVisVolumes = 4;
 
 	static FRDGTextureRef RegisterOrBlack(FRDGBuilder& GraphBuilder, const TRefCountPtr<IPooledRenderTarget>& Texture)
@@ -224,12 +239,15 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 	const FRenderTargetBindingSlots& RenderTargets,
 	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUB)
 {
+	// CVar 关闭 / 非 FViewInfo / 无 Family·Scene：跳过，避免空 RDG 分配。
 	if (!IsSkyVisibilityEnabled() || !InView.bIsViewInfo || !InView.Family || !InView.Family->Scene)
 	{
 		return;
 	}
 
-	// 引擎保证 BasePass（含本 hook）完成后再跑 DiffuseIndirect；同帧 GBufferC.a 写后读依赖引擎 pass 序
+	// 引擎调度：BasePass（含本 hook）结束后才跑 DiffuseIndirect。
+	// 因此这里写完 GBufferC.a 后，同帧 DDGI ApplyLighting 读 GBufferC 可见结果。
+	// 依赖引擎 pass 序，不跨 GraphBuilder 手写依赖边。
 	FViewInfo& View = static_cast<FViewInfo&>(InView);
 	const FSceneInterface* Scene = View.Family->Scene;
 
@@ -244,7 +262,8 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 	TArray<FProxyEntry, TInlineAllocator<GMaxSkyVisVolumes>> Volumes;
 	for (FDDGIVolumeSceneProxy* Proxy : FDDGIVolumeSceneProxy::AllProxiesReadyForRender_RenderThread)
 	{
-		// 与 ApplyLighting 列表对齐：本 Scene、启用 volume、有 distance、sky vis intensity>0
+		// 与 ApplyLighting「有效 sky-vis volume」对齐，避免 writer/reader 开关漂移：
+		// 本 Scene、EnableVolume、distance 已分配、SkyVisibilityIntensity>0。
 		if (!Proxy || Proxy->OwningScene != Scene || !Proxy->ComponentData.EnableVolume || !Proxy->ProbesDistance.IsValid())
 		{
 			continue;
@@ -255,15 +274,16 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		}
 
 		const FVector3f Scale = Proxy->ComponentData.Transform.GetScale3D();
-		// UE volume 世界尺寸 ≈ Scale*200；密度仅用于排序 densest-first
+		// 与 ApplyLighting 一致：Scale*200 ≈ 体积世界尺寸（半径*2 * 隐式 100）。
+		// Density=探针数/体积，只用于 densest-first 排序，不进着色公式。
 		const FVector3f WorldSize = Scale * 200.0f;
-		const float VolumeVolume = FMath::Max(WorldSize.X * WorldSize.Y * WorldSize.Z, KINDA_SMALL_NUMBER);
+		const float VolumeWorldVolume = FMath::Max(WorldSize.X * WorldSize.Y * WorldSize.Z, KINDA_SMALL_NUMBER);
 		const float ProbeCount = float(Proxy->ComponentData.ProbeCounts.X * Proxy->ComponentData.ProbeCounts.Y * Proxy->ComponentData.ProbeCounts.Z);
 		const FQuat4f Rot = Proxy->ComponentData.Transform.GetRotation();
 
 		Volumes.Add(FProxyEntry{
 			Proxy,
-			ProbeCount / VolumeVolume,
+			ProbeCount / VolumeWorldVolume,
 			FVector4f(Rot.X, Rot.Y, Rot.Z, Rot.W),
 			Scale
 		});
@@ -280,7 +300,8 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		Volumes.SetNum(GMaxSkyVisVolumes, EAllowShrinking::No);
 	}
 
-	// Require matching relocation/scrolling flags across bound volumes (same as ApplyLighting)
+	// 与 ApplyLighting 相同：同一 CS 置换只能有一种 Relocation/Scrolling 组合。
+	// 混绑会导致宏与纹理布局不一致，剔除不匹配 volume。
 	const bool bRelocation = Volumes[0].Proxy->ComponentData.EnableProbeRelocation;
 	const bool bScrolling = Volumes[0].Proxy->ComponentData.EnableProbeScrolling;
 	for (int32 i = Volumes.Num() - 1; i >= 0; --i)
@@ -296,7 +317,8 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		return;
 	}
 
-	// UE5.7：FSceneTextures::Get(GraphBuilder) 已移除；从 ViewFamily 取
+	// UE5.7 起无 FSceneTextures::Get(GraphBuilder)。
+	// 渲染中 Family 为 FViewFamilyInfo，用 GetSceneTexturesChecked 取已初始化 GBuffer/Depth。
 	const FViewFamilyInfo* ViewFamilyInfo = static_cast<const FViewFamilyInfo*>(View.Family);
 	const FSceneTextures* SceneTexturesPtr = ViewFamilyInfo ? ViewFamilyInfo->GetSceneTexturesChecked() : nullptr;
 	if (!SceneTexturesPtr)
@@ -349,7 +371,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		PassParameters->SoftNear = GetSoftNear();
 		PassParameters->SoftFar = FMath::Max(GetSoftFar(), GetSoftNear() + 1.0f);
 		PassParameters->WorldUpBias = GetWorldUpBias();
-		// 全局泄露地板；per-volume SkyLightLeak 在 shader 里 max(Floor, VolLeak)
+		// SoftLeakFloor=全局地板；Volume_*_SkyLightLeak 在 usf 中 max(Floor,Vol)；densest 赢时用该 volume 自己的 Leak。
 		PassParameters->SoftLeakFloor = GetSoftLeak();
 		PassParameters->NumVolumes = Volumes.Num();
 		PassParameters->SkyVisOutput = GraphBuilder.CreateUAV(SkyVisRT);
@@ -398,7 +420,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		{
 			BindVolume(i, Volumes[i].Proxy, Volumes[i].Rotation, Volumes[i].Scale);
 		}
-		// Unused slots: black textures + zero intensity (NumVolumes gates evaluation)
+		// 空槽合法绑定：Distance/Offsets=BlackDummy；States=R8_UINT ACTIVE dummy；Intensity/Leak=0。usf 用 NumVolumes 截断。
 		for (int32 i = Volumes.Num(); i < GMaxSkyVisVolumes; ++i)
 		{
 #define ZERO_SLOT(N) \
