@@ -81,9 +81,9 @@ namespace
 
 BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, NormalTexture)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferBTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SkyVis_SceneDepth)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SkyVis_GBufferA)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SkyVis_GBufferB)
 	SHADER_PARAMETER_SAMPLER(SamplerState, PointClampSampler)
 	SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
 	SHADER_PARAMETER(FIntPoint, ViewOffset)
@@ -184,13 +184,13 @@ IMPLEMENT_GLOBAL_SHADER(FSkyVisibilityCS, "/Plugin/RTXGI/Private/SkyVisibilityCS
 BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCompositeCSParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SkyVisTexture)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, GBufferBTexture)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SkyVis_GBufferB)
 	SHADER_PARAMETER_SAMPLER(SamplerState, LinearClampSampler)
 	SHADER_PARAMETER_SAMPLER(SamplerState, PointClampSampler)
 	SHADER_PARAMETER(FIntPoint, ViewOffset)
 	SHADER_PARAMETER(FIntPoint, ViewSize)
 	SHADER_PARAMETER(FIntPoint, SkyVisSize)
-	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, GBufferCUAV)
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SkyVis_GBufferCUAV)
 END_SHADER_PARAMETER_STRUCT()
 
 class FSkyVisibilityCompositeCS : public FGlobalShader
@@ -337,9 +337,9 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 
 		FSkyVisibilityCSParameters* PassParameters = GraphBuilder.AllocParameters<FSkyVisibilityCSParameters>();
 		PassParameters->View = View.ViewUniformBuffer;
-		PassParameters->DepthTexture = SceneDepth;
-		PassParameters->NormalTexture = GBufferA;
-		PassParameters->GBufferBTexture = GBufferB;
+		PassParameters->SkyVis_SceneDepth = SceneDepth;
+		PassParameters->SkyVis_GBufferA = GBufferA;
+		PassParameters->SkyVis_GBufferB = GBufferB;
 		PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		PassParameters->ViewOffset = View.ViewRect.Min;
@@ -434,13 +434,13 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		FSkyVisibilityCompositeCSParameters* PassParameters = GraphBuilder.AllocParameters<FSkyVisibilityCompositeCSParameters>();
 		PassParameters->View = View.ViewUniformBuffer;
 		PassParameters->SkyVisTexture = SkyVisRT;
-		PassParameters->GBufferBTexture = GBufferB;
+		PassParameters->SkyVis_GBufferB = GBufferB;
 		PassParameters->LinearClampSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		PassParameters->PointClampSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		PassParameters->ViewOffset = View.ViewRect.Min;
 		PassParameters->ViewSize = FullViewSize;
 		PassParameters->SkyVisSize = DispatchSize;
-		PassParameters->GBufferCUAV = GraphBuilder.CreateUAV(GBufferC);
+		PassParameters->SkyVis_GBufferCUAV = GraphBuilder.CreateUAV(GBufferC);
 
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,

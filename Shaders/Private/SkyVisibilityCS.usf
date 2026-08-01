@@ -11,9 +11,9 @@
 #define RTXGI_SKYVIS_MAX_VOLUMES 4
 #endif
 
-Texture2D<float>    DepthTexture;
-Texture2D<float4>   NormalTexture;
-Texture2D<float4>   GBufferBTexture;
+Texture2D<float>    SkyVis_SceneDepth;
+Texture2D<float4>   SkyVis_GBufferA;
+Texture2D<float4>   SkyVis_GBufferB;
 
 SamplerState        PointClampSampler;
 SamplerState        LinearClampSampler;
@@ -147,7 +147,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	int2 FullPixel = int2(FullUV * float2(FullViewSize)) + ViewOffset;
 	float2 BufferUV = (float2(FullPixel) + 0.5f) * View.BufferSizeAndInvSize.zw;
 
-	float DeviceZ = DepthTexture.SampleLevel(PointClampSampler, BufferUV, 0).r;
+	float DeviceZ = SkyVis_SceneDepth.SampleLevel(PointClampSampler, BufferUV, 0).r;
 	if (DeviceZ == 0.0f)
 	{
 		SkyVisOutput[DispatchThreadID.xy] = 1.0f;
@@ -155,7 +155,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	}
 
 	// Skip Unlit — GBufferB packs shading model id
-	float4 GBufferB = GBufferBTexture.SampleLevel(PointClampSampler, BufferUV, 0);
+	float4 GBufferB = SkyVis_GBufferB.SampleLevel(PointClampSampler, BufferUV, 0);
 	uint ShadingModelId = DecodeShadingModelId(GBufferB.a);
 	if (ShadingModelId == SHADINGMODELID_UNLIT)
 	{
@@ -171,7 +171,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 #else
 	float3 WorldPosition = InScreenVector * SceneDepth + LWCHackToFloat(PrimaryView.WorldCameraOrigin);
 #endif
-	float3 Normal = normalize(DecodeNormal(NormalTexture.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
+	float3 Normal = normalize(DecodeNormal(SkyVis_GBufferA.SampleLevel(PointClampSampler, BufferUV, 0).xyz));
 
 	// Densest-first: first containing volume wins
 	float Result = 1.0f;

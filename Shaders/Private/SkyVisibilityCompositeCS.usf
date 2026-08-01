@@ -6,7 +6,7 @@
 #include "/Engine/Private/DeferredShadingCommon.ush"
 
 Texture2D<float>    SkyVisTexture;
-Texture2D<float4>   GBufferBTexture;
+Texture2D<float4>   SkyVis_GBufferB;
 SamplerState        LinearClampSampler;
 SamplerState        PointClampSampler;
 
@@ -15,7 +15,7 @@ int2                ViewSize;
 int2                SkyVisSize;
 
 // UAV-only RMW — do not also bind GBufferC as SRV
-RWTexture2D<float4> GBufferCUAV;
+RWTexture2D<float4> SkyVis_GBufferCUAV;
 
 [numthreads(8, 8, 1)]
 void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
@@ -28,7 +28,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	int2 PixelIndex = int2(DispatchThreadID.xy) + ViewOffset;
 
 	float2 BufferUV = (float2(PixelIndex) + 0.5f) * View.BufferSizeAndInvSize.zw;
-	float4 GBufferB = GBufferBTexture.SampleLevel(PointClampSampler, BufferUV, 0);
+	float4 GBufferB = SkyVis_GBufferB.SampleLevel(PointClampSampler, BufferUV, 0);
 	uint ShadingModelId = DecodeShadingModelId(GBufferB.a);
 	if (ShadingModelId == SHADINGMODELID_UNLIT)
 	{
@@ -38,7 +38,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	float2 SkyVisUV = (float2(DispatchThreadID.xy) + 0.5f) / float2(ViewSize);
 	float skyVis = SkyVisTexture.SampleLevel(LinearClampSampler, SkyVisUV, 0).r;
 
-	float4 GBufferC = GBufferCUAV[PixelIndex];
+	float4 GBufferC = SkyVis_GBufferCUAV[PixelIndex];
 	GBufferC.a = min(GBufferC.a, skyVis);
-	GBufferCUAV[PixelIndex] = GBufferC;
+	SkyVis_GBufferCUAV[PixelIndex] = GBufferC;
 }
