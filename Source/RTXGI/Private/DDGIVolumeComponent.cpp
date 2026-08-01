@@ -10,6 +10,7 @@
 
 #include "DDGIVolumeComponent.h"
 #include "DDGIUtilities.h"
+#include "DDGIRenderHelpers.h"
 #include "DDGISkyVisibilitySubsystem.h"
 #include "DDGIVolume.h"
 #include "DDGIVolumeUpdate.h"

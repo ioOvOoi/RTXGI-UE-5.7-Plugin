@@ -39,6 +39,7 @@
 #include "BuiltInRayTracingShaders.h"
 #include "DDGIVolumeComponent.h"
 #include "DDGIUtilities.h"
+#include "DDGIRenderHelpers.h"
 #include "DDGIVolumeDescGPU.h"
 #include "LegacyEngineCompat.h"
 #include "RayTracing/RayTracingLighting.h"

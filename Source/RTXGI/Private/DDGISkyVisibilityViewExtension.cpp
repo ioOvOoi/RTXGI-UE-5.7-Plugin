@@ -1,6 +1,7 @@
 #include "DDGISkyVisibilityViewExtension.h"
 #include "DDGIVolumeComponent.h"
 #include "DDGIUtilities.h"
+#include "DDGIRenderHelpers.h"
 #include "LegacyEngineCompat.h"
 
 #include "DataDrivenShaderPlatformInfo.h"

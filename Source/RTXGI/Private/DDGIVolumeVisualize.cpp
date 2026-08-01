@@ -26,6 +26,7 @@
 #include "DeferredShadingRenderer.h"
 #include "ScenePrivate.h"
 #include "DDGIUtilities.h"
+#include "DDGIRenderHelpers.h"
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 

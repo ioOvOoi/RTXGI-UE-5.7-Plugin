@@ -16,7 +16,6 @@
 #include "RHI.h"
 #include "RHIResources.h"
 #include "RendererInterface.h"
-#include "RenderGraphBuilder.h"
 
 /*
 * Helper class to time sections of the GPU work.
@@ -63,13 +62,3 @@ private:
 	FRHIPooledRenderQuery EndQueries[NumBufferedFrames];
 	FGraphEventRef QuerySubmittedFences[NumBufferedFrames];
 };
-
-// --- DDGI RDG helpers ---
-
-/** 1x1 R8_UINT cleared to 0 (= PROBE_STATE_ACTIVE). 勿用 BlackDummy 绑 Texture2D<uint> ProbeStates。 */
-FRDGTextureRef DDGICreateActiveProbeStatesDummy(FRDGBuilder& GraphBuilder);
-
-/** 有 ProbesStates 则注册；否则 ACTIVE dummy。 */
-FRDGTextureRef DDGIRegisterProbeStatesOrActiveDummy(FRDGBuilder& GraphBuilder, const TRefCountPtr<IPooledRenderTarget>& ProbesStates);
-
-
