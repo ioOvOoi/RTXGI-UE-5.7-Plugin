@@ -68,6 +68,12 @@ namespace
 		static const auto* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyVisibility.WorldUpBias"));
 		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.35f;
 	}
+
+	static float GetSoftLeak()
+	{
+		static const auto* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"));
+		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.2f;
+	}
 }
 
 BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
@@ -84,6 +90,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FSkyVisibilityCSParameters, )
 	SHADER_PARAMETER(float, SoftNear)
 	SHADER_PARAMETER(float, SoftFar)
 	SHADER_PARAMETER(float, WorldUpBias)
+	SHADER_PARAMETER(float, SoftLeak)
 	SHADER_PARAMETER(int32, NumVolumes)
 
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, Volume_0_ProbeDistance)
@@ -324,6 +331,13 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		PassParameters->SoftNear = GetSoftNear();
 		PassParameters->SoftFar = FMath::Max(GetSoftFar(), GetSoftNear() + 1.0f);
 		PassParameters->WorldUpBias = GetWorldUpBias();
+		// 全局 Leak 与各 volume SkyLightLeak 取 max，避免过黑
+		float Leak = GetSoftLeak();
+		for (const FProxyEntry& E : Volumes)
+		{
+			Leak = FMath::Max(Leak, FMath::Clamp(E.Proxy->ComponentData.SkyLightLeak, 0.0f, 1.0f));
+		}
+		PassParameters->SoftLeak = Leak;
 		PassParameters->NumVolumes = Volumes.Num();
 		PassParameters->SkyVisOutput = GraphBuilder.CreateUAV(SkyVisRT);
 

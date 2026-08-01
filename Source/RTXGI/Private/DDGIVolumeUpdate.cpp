@@ -1414,17 +1414,23 @@ void DebugShaderPlatformsDetailed()
 			PassParameters->DDGIProbeScrollSpace = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSpace));
 
 		// skylight parameters
-		if (Scene.SkyLight && Scene.SkyLight->ProcessedTexture)
 		{
-			PassParameters->Sky_Color = static_cast<FVector3f>(Scene.SkyLight->GetEffectiveLightColor());
-			PassParameters->Sky_Texture = Scene.SkyLight->ProcessedTexture->TextureRHI;
-			PassParameters->Sky_TextureSampler = Scene.SkyLight->ProcessedTexture->SamplerStateRHI;
-		}
-		else
-		{
-			PassParameters->Sky_Color = FVector3f(0.0);
-			PassParameters->Sky_Texture = GBlackTextureCube->TextureRHI;
-			PassParameters->Sky_TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+			static const auto* CVarSkyMiss = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyOnMiss.Intensity"));
+			const float GlobalSkyMiss = CVarSkyMiss ? FMath::Max(0.0f, CVarSkyMiss->GetFloat()) : 1.0f;
+			const float VolSkyMiss = FMath::Max(0.0f, VolProxy->ComponentData.SkyOnMissIntensity);
+			const float SkyMissScale = GlobalSkyMiss * VolSkyMiss;
+			if (Scene.SkyLight && Scene.SkyLight->ProcessedTexture)
+			{
+				PassParameters->Sky_Color = static_cast<FVector3f>(Scene.SkyLight->GetEffectiveLightColor()) * SkyMissScale;
+				PassParameters->Sky_Texture = Scene.SkyLight->ProcessedTexture->TextureRHI;
+				PassParameters->Sky_TextureSampler = Scene.SkyLight->ProcessedTexture->SamplerStateRHI;
+			}
+			else
+			{
+				PassParameters->Sky_Color = FVector3f(0.0);
+				PassParameters->Sky_Texture = GBlackTextureCube->TextureRHI;
+				PassParameters->Sky_TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+			}
 		}
 
 		// DDGI Volume Parameters

@@ -78,22 +78,33 @@ static TAutoConsoleVariable<int32> CVarSkyVisibilitySampleCount(
 static TAutoConsoleVariable<float> CVarSkyVisibilitySoftNear(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.SoftNear"),
 	300.0f,
-	TEXT("Soft sky openness near distance in cm. Hits closer than this count as fully occluded (vis~0). Default 300 (~3m).
-"),
+	TEXT("中远距 soft 近距(cm)：更近视为遮挡。默认 300。\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarSkyVisibilitySoftFar(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.SoftFar"),
 	8000.0f,
-	TEXT("Soft sky openness far distance in cm. Hits beyond this approach fully open (vis~1); sky-miss is always 1. Default 8000 (~80m) for mid/long-range vs DFAO.
-"),
+	TEXT("中远距 soft 远距(cm)：更远接近全开。默认 8000(~80m)。\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.WorldUpBias"),
 	0.35f,
-	TEXT("Blend sample axis toward world +Z for sky-dominant mid-range occlusion. 0=surface normal only, 1=world up only. Default 0.35.
-"),
+	TEXT("采样轴向世界+Z 混合。0=纯法线，1=纯上天。默认 0.35。\n"),
+	ECVF_RenderThreadSafe);
+
+// 天空光泄露：遮挡处仍保留的最低开阔度，避免室内过黑（类 Lumen 可调漏光）
+static TAutoConsoleVariable<float> CVarSkyVisibilityLeak(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"),
+	0.2f,
+	TEXT("天空光泄露 [0,1]。遮挡处 openness 下限；0=可全黑，0.2=默认略亮，1=关闭遮蔽压暗。\n"),
+	ECVF_RenderThreadSafe);
+
+// 探针 Ray Miss 时天空贡献倍率（Raster SH / Cubemap）
+static TAutoConsoleVariable<float> CVarSkyOnMissIntensity(
+	TEXT("r.RTXGI.DDGI.SkyOnMiss.Intensity"),
+	1.0f,
+	TEXT("探针射线 miss 时天空光强度倍率。>1 更亮的天空进 DDGI，0=等同 None。\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarChebyshevFloor(
@@ -167,6 +178,7 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(int32, NumVolumes)
 	SHADER_PARAMETER(int32, SkyVisibilityEnable)
 	SHADER_PARAMETER(float, SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, SkyVisibilityLeak)
 	SHADER_PARAMETER(float, ChebyshevFloor)
 	// Volumes are sorted from densest probes to least dense probes
 	SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
@@ -792,6 +804,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->NumVolumes = numVolumes;
 			PassParameters->SkyVisibilityEnable = CVarSkyVisibility.GetValueOnRenderThread() ? 1 : 0;
 			PassParameters->SkyVisibilityIntensity = CVarSkyVisibilityIntensity.GetValueOnRenderThread();
+			PassParameters->SkyVisibilityLeak = FMath::Clamp(CVarSkyVisibilityLeak.GetValueOnRenderThread(), 0.0f, 1.0f);
 			PassParameters->ChebyshevFloor = CVarChebyshevFloor.GetValueOnRenderThread();
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -1483,6 +1496,8 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.Mode = VolumeMode;
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
 		ComponentData.SkyVisibilityIntensity = FMath::Clamp(SkyVisibilityIntensity, 0.0f, 1.0f);
+		ComponentData.SkyLightLeak = FMath::Clamp(SkyLightLeak, 0.0f, 1.0f);
+		ComponentData.SkyOnMissIntensity = FMath::Max(0.0f, SkyOnMissIntensity);
 
 		if (ScrollProbesInfinitely)
 		{

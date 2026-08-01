@@ -35,6 +35,7 @@ uint                ShouldUsePreExposure;
 uint                NumVolumes;
 int                 SkyVisibilityEnable;
 float               SkyVisibilityIntensity;
+float               SkyVisibilityLeak;
 float               ChebyshevFloor;
 
 // generate an array of structures for each probe volume
@@ -249,8 +250,10 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
     // Writer（ViewExtension）已把 per-volume intensity 写进 GBufferC.a；此处 BaseColorTexture 即 GBufferC。
     if (SkyVisibilityEnable != 0)
     {
+        // Leak：遮挡处 openness 下限，室内不至于被压死黑
         float gBufferAO = BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).a;
-        AccLightWeight.rgb *= lerp(1.0f, gBufferAO, SkyVisibilityIntensity);
+        float openness = max(gBufferAO, SkyVisibilityLeak);
+        AccLightWeight.rgb *= lerp(1.0f, openness, SkyVisibilityIntensity);
     }
 
     LightingPassUAV[PixelIndex] += float4(AccLightWeight.rgb * AccLightWeight.a * PreExposure, 0.f);

@@ -25,6 +25,7 @@ int                 SampleCount;
 float               SoftNear;
 float               SoftFar;
 float               WorldUpBias;
+float               SoftLeak;
 int                 NumVolumes;
 
 Texture2D<float4>   Volume_0_ProbeDistance;
@@ -122,7 +123,9 @@ float EvalVolumeSkyVisibility(
 #endif
 
 	float skyVis = DDGIGetVolumeSkyVisibility(WorldPosition, Normal, Volume, Resources, SampleCount, SoftNear, SoftFar, WorldUpBias);
-	return lerp(1.0f, skyVis, Intensity);
+	// Intensity 压暗强度；SoftLeak 为遮挡处 openness 下限（天空光泄露）
+	float openness = lerp(SoftLeak, 1.0f, skyVis);
+	return lerp(1.0f, openness, Intensity);
 }
 
 [numthreads(8, 8, 1)]

@@ -204,6 +204,8 @@ public:
 		EDDGIVolumeMode Mode = EDDGIVolumeMode::Runtime; // Volume operational mode
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 		float SkyVisibilityIntensity = 1.0f;
+		float SkyLightLeak = 0.2f;
+		float SkyOnMissIntensity = 1.0f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
@@ -469,9 +471,13 @@ public:
 
 	// --- "GI Lighting" properties
 
-	// What type of skylight should contribute to GI
+	// 探针射线 miss 时天空如何进入 DDGI
 	UPROPERTY(EditAnywhere, Category = "GI Lighting");
 	EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
+
+	// 探针 miss 天空贡献倍率（再乘全局 r.RTXGI.DDGI.SkyOnMiss.Intensity）
+	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0", ClampMax = "4", UIMin = "0", UIMax = "4"))
+	float SkyOnMissIntensity = 1.0f;
 
 	// Bias values for Indirect Lighting
 	UPROPERTY(EditAnywhere, Category = "GI Lighting", meta = (ClampMin = "0"));
@@ -504,6 +510,10 @@ public:
 	// Per-volume sky visibility intensity. 0=no large-scale occlusion, 1=full. Multiplied with global r.RTXGI.DDGI.SkyVisibility.Intensity. Useful to weaken distant volumes.
 	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
 	float SkyVisibilityIntensity = 1.0f;
+
+	// 遮挡处仍保留的天光开阔度下限，避免环境过黑（类 Lumen 可调漏光）
+	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
+	float SkyLightLeak = 0.2f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")
