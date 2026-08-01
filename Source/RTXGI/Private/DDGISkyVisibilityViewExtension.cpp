@@ -296,7 +296,14 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		return;
 	}
 
-	FSceneTextures& SceneTextures = FSceneTextures::Get(GraphBuilder);
+	// UE5.7：FSceneTextures::Get(GraphBuilder) 已移除；从 ViewFamily 取
+	const FViewFamilyInfo* ViewFamilyInfo = static_cast<const FViewFamilyInfo*>(View.Family);
+	const FSceneTextures* SceneTexturesPtr = ViewFamilyInfo ? ViewFamilyInfo->GetSceneTexturesChecked() : nullptr;
+	if (!SceneTexturesPtr)
+	{
+		return;
+	}
+	const FSceneTextures& SceneTextures = *SceneTexturesPtr;
 	FRDGTextureRef GBufferA = SceneTextures.GBufferA;
 	FRDGTextureRef GBufferB = SceneTextures.GBufferB;
 	FRDGTextureRef GBufferC = SceneTextures.GBufferC;
