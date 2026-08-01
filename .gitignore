@@ -1,12 +1,19 @@
 Binaries
 Intermediate
+
+# --- AI / agent tooling (keep out of repo) ---
+AGENTS.md
 CLAUDE.md
 progress.md
+.claude/
+.cortexkit/
+.opencode/
+.pi/
+.pi-subagents/
+.gitnexus/
+.scratch/
+.slim/
 .logs/
-.slim/deepwork/
-.slim/worktrees/
-.slim/worktrees.json
-# BEGIN oh-my-opencode-slim worktrees
-.slim/worktrees/
-.slim/worktrees.json
-# END oh-my-opencode-slim worktrees
+openspec/
+undefined/
+.ignore
