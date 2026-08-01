@@ -127,7 +127,7 @@ float3 DDGIGetVolumeIrradiance(
 
             // If the probe is marked as inactive, don't allow it to contribute to indirect lighting
             int2 texelPosition = DDGIGetProbeTexelPosition(probeIndex, volume.probeGridCounts);
-            int  probeState = resources.probeStatesSRV[texelPosition];
+            int  probeState = resources.probeStatesSRV.Load(int3(texelPosition, 0)).r;
             if (probeState == PROBE_STATE_INACTIVE) continue;
         }
 #endif
@@ -310,7 +310,7 @@ float DDGIGetVolumeSkyVisibility(
                 int stateProbeIndex = adjacentProbeIndex;
             #endif
             int2 texelPosition = DDGIGetProbeTexelPosition(stateProbeIndex, volume.probeGridCounts);
-            int probeState = resources.probeStatesSRV[texelPosition];
+            int probeState = resources.probeStatesSRV.Load(int3(texelPosition, 0)).r;
             if (probeState == PROBE_STATE_INACTIVE) continue;
         }
     #endif

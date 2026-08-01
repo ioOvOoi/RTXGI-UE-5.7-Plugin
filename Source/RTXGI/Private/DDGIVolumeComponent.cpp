@@ -178,7 +178,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(int32, NumVolumes)
 	SHADER_PARAMETER(int32, SkyVisibilityEnable)
 	SHADER_PARAMETER(float, SkyVisibilityIntensity)
-	SHADER_PARAMETER(float, SkyVisibilityLeak)
 	SHADER_PARAMETER(float, ChebyshevFloor)
 	// Volumes are sorted from densest probes to least dense probes
 	SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
@@ -802,9 +801,18 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
-			PassParameters->SkyVisibilityEnable = CVarSkyVisibility.GetValueOnRenderThread() ? 1 : 0;
+			// 仅当 CVar 开且本帧 shading volume 中至少有一个开启 sky vis 时，reader 才调制
+			bool bAnySkyVisVolume = false;
+			for (int32 si = 0; si < volumes.Num(); ++si)
+			{
+				if (volumes[si].proxy && volumes[si].proxy->ComponentData.SkyVisibilityIntensity > 0.0f)
+				{
+					bAnySkyVisVolume = true;
+					break;
+				}
+			}
+			PassParameters->SkyVisibilityEnable = (CVarSkyVisibility.GetValueOnRenderThread() && bAnySkyVisVolume) ? 1 : 0;
 			PassParameters->SkyVisibilityIntensity = CVarSkyVisibilityIntensity.GetValueOnRenderThread();
-			PassParameters->SkyVisibilityLeak = FMath::Clamp(CVarSkyVisibilityLeak.GetValueOnRenderThread(), 0.0f, 1.0f);
 			PassParameters->ChebyshevFloor = CVarChebyshevFloor.GetValueOnRenderThread();
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)

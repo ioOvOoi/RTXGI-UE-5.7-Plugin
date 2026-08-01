@@ -67,6 +67,7 @@ int                 DDGIVolume_ProbeIndexStart;
 int                 DDGIVolume_ProbeIndexCount;
 
 float3              Sky_Color;
+float               Sky_Intensity;
 TextureCube<float4> Sky_Texture;
 SamplerState        Sky_TextureSampler;
 
@@ -77,9 +78,10 @@ float3 GetEnvironmentalRadiance(in float3 direction)
 #if RTXGI_DDGI_SKY_LIGHT_TYPE == 0 // None
     return 0.f;
 #elif RTXGI_DDGI_SKY_LIGHT_TYPE == 1 // Raster
-    return Sky_Color * GetSkySHDiffuse(direction);
+    // Sky_Intensity 单独调 miss 天空贡献，避免把倍率烤进 Sky_Color 导致染色过曝
+    return Sky_Color * Sky_Intensity * GetSkySHDiffuse(direction);
 #else // RTXGI_DDGI_SKY_LIGHT_TYPE == 2 // Ray Tracing
-    return Sky_Color * TextureCubeSampleLevel(Sky_Texture, Sky_TextureSampler, direction, 0).rgb;
+    return Sky_Color * Sky_Intensity * TextureCubeSampleLevel(Sky_Texture, Sky_TextureSampler, direction, 0).rgb;
 #endif
 }
 

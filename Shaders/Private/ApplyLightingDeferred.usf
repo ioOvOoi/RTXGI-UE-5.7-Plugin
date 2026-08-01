@@ -35,7 +35,6 @@ uint                ShouldUsePreExposure;
 uint                NumVolumes;
 int                 SkyVisibilityEnable;
 float               SkyVisibilityIntensity;
-float               SkyVisibilityLeak;
 float               ChebyshevFloor;
 
 // generate an array of structures for each probe volume
@@ -245,15 +244,13 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 
     float PreExposure = ShouldUsePreExposure ? View.PreExposure : 1.0f;
 
-    // Reader：只在此用全局 Intensity 乘一次（design D2）。
-    // 为什么不放进 ApplyVolumeLightingContribution：多 volume 混合后乘 AO，避免每 volume 重复压暗。
-    // Writer（ViewExtension）已把 per-volume intensity 写进 GBufferC.a；此处 BaseColorTexture 即 GBufferC。
+    // Reader：GBufferC.a 已由 writer 写入最终 openness（含 per-vol intensity + SoftLeak）。
+    // 此处只用全局 Intensity 控制 DDGI 间接是否跟随 AO；不再二次 max(Leak)。
+    // SkyVisibilityEnable 仅在本帧确实有有效 sky-vis volume 时置 1。
     if (SkyVisibilityEnable != 0)
     {
-        // Leak：遮挡处 openness 下限，室内不至于被压死黑
         float gBufferAO = BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).a;
-        float openness = max(gBufferAO, SkyVisibilityLeak);
-        AccLightWeight.rgb *= lerp(1.0f, openness, SkyVisibilityIntensity);
+        AccLightWeight.rgb *= lerp(1.0f, gBufferAO, SkyVisibilityIntensity);
     }
 
     LightingPassUAV[PixelIndex] += float4(AccLightWeight.rgb * AccLightWeight.a * PreExposure, 0.f);

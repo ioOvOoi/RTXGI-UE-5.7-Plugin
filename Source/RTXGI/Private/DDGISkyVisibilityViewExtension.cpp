@@ -28,6 +28,15 @@ namespace
 		return GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 	}
 
+	// ProbeStates 是 Texture2D<uint>；BlackDummy 是 float。绑 R8_UINT=0 (=PROBE_STATE_ACTIVE) 避免未定义读取
+	static FRDGTextureRef MakeActiveProbeStatesDummy(FRDGBuilder& GraphBuilder)
+	{
+		FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(FIntPoint(1, 1), PF_R8_UINT, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
+		FRDGTextureRef Tex = GraphBuilder.CreateTexture(Desc, TEXT("DDGI.SkyVis.StatesActiveDummy"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Tex), 0u);
+		return Tex;
+	}
+
 	static bool IsSkyVisibilityEnabled()
 	{
 		static const auto* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyVisibility"));
@@ -222,6 +231,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		return;
 	}
 
+	// 引擎保证 BasePass（含本 hook）完成后再跑 DiffuseIndirect；同帧 GBufferC.a 写后读依赖引擎 pass 序
 	FViewInfo& View = static_cast<FViewInfo&>(InView);
 	const FSceneInterface* Scene = View.Family->Scene;
 
@@ -246,13 +256,15 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		}
 
 		const FVector3f Scale = Proxy->ComponentData.Transform.GetScale3D();
-		const float VolumeSize = FMath::Max(Scale.X * Scale.Y * Scale.Z, KINDA_SMALL_NUMBER);
+		// UE volume 世界尺寸 ≈ Scale*200；密度仅用于排序 densest-first
+		const FVector3f WorldSize = Scale * 200.0f;
+		const float VolumeVolume = FMath::Max(WorldSize.X * WorldSize.Y * WorldSize.Z, KINDA_SMALL_NUMBER);
 		const float ProbeCount = float(Proxy->ComponentData.ProbeCounts.X * Proxy->ComponentData.ProbeCounts.Y * Proxy->ComponentData.ProbeCounts.Z);
 		const FQuat4f Rot = Proxy->ComponentData.Transform.GetRotation();
 
 		Volumes.Add(FProxyEntry{
 			Proxy,
-			ProbeCount / VolumeSize,
+			ProbeCount / VolumeVolume,
 			FVector4f(Rot.X, Rot.Y, Rot.Z, Rot.W),
 			Scale
 		});
@@ -342,6 +354,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		PassParameters->SkyVisOutput = GraphBuilder.CreateUAV(SkyVisRT);
 
 		FRDGTextureRef Black = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+		FRDGTextureRef StatesActiveDummy = MakeActiveProbeStatesDummy(GraphBuilder);
 
 		auto BindVolume = [&](int32 Index, FDDGIVolumeSceneProxy* Proxy, const FVector4f& Rotation, const FVector3f& Scale)
 		{
@@ -353,7 +366,9 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 			const FVector3f Radius = Scale * 100.0f;
 			const FRDGTextureRef Distance = GraphBuilder.RegisterExternalTexture(Proxy->ProbesDistance);
 			const FRDGTextureRef Offsets = RegisterOrBlack(GraphBuilder, Proxy->ProbesOffsets);
-			const FRDGTextureRef States = RegisterOrBlack(GraphBuilder, Proxy->ProbesStates);
+			const FRDGTextureRef States = Proxy->ProbesStates.IsValid()
+				? GraphBuilder.RegisterExternalTexture(Proxy->ProbesStates)
+				: StatesActiveDummy;
 
 #define BIND_VOLUME_SLOT(N) \
 			if (Index == N) \
@@ -389,7 +404,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 			{ \
 				PassParameters->Volume_##N##_ProbeDistance = Black; \
 				PassParameters->Volume_##N##_ProbeOffsets = Black; \
-				PassParameters->Volume_##N##_ProbeStates = Black; \
+				PassParameters->Volume_##N##_ProbeStates = StatesActiveDummy; \
 				PassParameters->Volume_##N##_Position = FVector3f::ZeroVector; \
 				PassParameters->Volume_##N##_Rotation = FVector4f(0, 0, 0, 1); \
 				PassParameters->Volume_##N##_Radius = FVector3f::ZeroVector; \

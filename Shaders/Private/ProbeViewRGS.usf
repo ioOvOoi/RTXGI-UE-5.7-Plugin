@@ -67,6 +67,7 @@ uint        DDGIVolume_ShouldUsePreExposure;
 float       DDGIVolume_IrradianceScalar;
 
 float3              Sky_Color;
+float               Sky_Intensity;
 TextureCube<float4> Sky_Texture;
 SamplerState        Sky_TextureSampler;
 
@@ -76,7 +77,7 @@ RWTexture2D<float4> RadianceOutput;
 
 float3 GetEnvironmentalRadiance(in float3 direction)
 {
-    return Sky_Color * TextureCubeSampleLevel(Sky_Texture, Sky_TextureSampler, direction, 0).rgb;
+    return Sky_Color * Sky_Intensity * TextureCubeSampleLevel(Sky_Texture, Sky_TextureSampler, direction, 0).rgb;
 }
 
 // This should match the logic of ProbeUpdateRGS above, for best results.

@@ -241,6 +241,7 @@ class FRayTracingRTXGIProbeUpdateRGS : public FGlobalShader
 	SHADER_PARAMETER(int, DDGIVolume_ProbeIndexCount)
 	SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FDDGIVolumeDescGPU, DDGIVolume)
 	SHADER_PARAMETER(FVector3f, Sky_Color)
+	SHADER_PARAMETER(float, Sky_Intensity)
 	SHADER_PARAMETER_TEXTURE(TextureCube, Sky_Texture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, Sky_TextureSampler)
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
@@ -306,6 +307,7 @@ class FRayTracingRTXGIProbeViewRGS : public FGlobalShader
 	SHADER_PARAMETER(float, DDGIVolume_IrradianceScalar)
 
 	SHADER_PARAMETER(FVector3f, Sky_Color)
+	SHADER_PARAMETER(float, Sky_Intensity)
 	SHADER_PARAMETER_TEXTURE(TextureCube, Sky_Texture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, Sky_TextureSampler)
 
@@ -1313,12 +1315,14 @@ void DebugShaderPlatformsDetailed()
     if (Scene.SkyLight && Scene.SkyLight->ProcessedTexture)
     {
         PassParameters->Sky_Color = static_cast<FVector3f>(Scene.SkyLight->GetEffectiveLightColor());
+        PassParameters->Sky_Intensity = 1.0f;
         PassParameters->Sky_Texture = Scene.SkyLight->ProcessedTexture->TextureRHI;
         PassParameters->Sky_TextureSampler = Scene.SkyLight->ProcessedTexture->SamplerStateRHI;
     }
     else
     {
         PassParameters->Sky_Color = FVector3f(0.0);
+        PassParameters->Sky_Intensity = 0.0f;
         PassParameters->Sky_Texture = GBlackTextureCube->TextureRHI;
         PassParameters->Sky_TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
     }
@@ -1415,19 +1419,21 @@ void DebugShaderPlatformsDetailed()
 
 		// skylight parameters
 		{
+			// TAutoConsoleVariable 静态缓存，避免每帧字符串查找
 			static const auto* CVarSkyMiss = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyOnMiss.Intensity"));
 			const float GlobalSkyMiss = CVarSkyMiss ? FMath::Max(0.0f, CVarSkyMiss->GetFloat()) : 1.0f;
 			const float VolSkyMiss = FMath::Max(0.0f, VolProxy->ComponentData.SkyOnMissIntensity);
-			const float SkyMissScale = GlobalSkyMiss * VolSkyMiss;
+			PassParameters->Sky_Intensity = GlobalSkyMiss * VolSkyMiss;
 			if (Scene.SkyLight && Scene.SkyLight->ProcessedTexture)
 			{
-				PassParameters->Sky_Color = static_cast<FVector3f>(Scene.SkyLight->GetEffectiveLightColor()) * SkyMissScale;
+				PassParameters->Sky_Color = static_cast<FVector3f>(Scene.SkyLight->GetEffectiveLightColor());
 				PassParameters->Sky_Texture = Scene.SkyLight->ProcessedTexture->TextureRHI;
 				PassParameters->Sky_TextureSampler = Scene.SkyLight->ProcessedTexture->SamplerStateRHI;
 			}
 			else
 			{
 				PassParameters->Sky_Color = FVector3f(0.0);
+				PassParameters->Sky_Intensity = 0.0f;
 				PassParameters->Sky_Texture = GBlackTextureCube->TextureRHI;
 				PassParameters->Sky_TextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			}
