@@ -47,6 +47,7 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 	float skyVis = SkyVisTexture.SampleLevel(LinearClampSampler, SkyVisUV, 0).r;
 
 	float4 GBufferC = SkyVis_GBufferCUAV[PixelIndex];
+	// min：只允许更暗。leak 只体现在 skyVis 闭区间下限，不会增强原版亮度。
 	GBufferC.a = min(GBufferC.a, skyVis);
 	SkyVis_GBufferCUAV[PixelIndex] = GBufferC;
 }

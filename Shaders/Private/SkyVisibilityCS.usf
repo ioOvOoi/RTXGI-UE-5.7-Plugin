@@ -141,8 +141,10 @@ float EvalVolumeSkyVisibility(
 #endif
 
 	float skyVis = DDGIGetVolumeSkyVisibility(WorldPosition, Normal, Volume, Resources, SampleCount, SoftNear, SoftFar, WorldUpBias);
-	// skyVis: 0=遮挡, 1=见天。leak 为遮挡区仍保留的下限（全局地板 max 本 volume）。
-	// Intensity: 0 表示本 volume 不压暗（始终 1）；1 表示完整应用 openness。
+	// skyVis: 0=封闭遮挡, 1=见天。
+	// leak: 仅当封闭时 openness 的下限（默认 0.5），让室内不完全死黑；见天时 openness=1，不改原亮。
+	// 注意：openness 永远 ≤1，后续 composite 对 GBufferAO 做 min，绝不会比原材质 AO 更亮。
+	// Intensity: 0=本 volume 不参与压暗；1=完整应用。
 	float leak = max(SoftLeakFloor, saturate(VolumeLeak));
 	float openness = lerp(leak, 1.0f, skyVis);
 	return lerp(1.0f, openness, Intensity);

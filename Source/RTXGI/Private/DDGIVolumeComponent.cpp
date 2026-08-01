@@ -98,14 +98,14 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
 // 天空光泄露：遮挡处仍保留的最低开阔度，避免室内过黑（类 Lumen 可调漏光）
 static TAutoConsoleVariable<float> CVarSkyVisibilityLeak(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"),
-	0.2f,
+	0.5f,
 	TEXT("全局天空光泄露地板 [0,1]。与 volume.SkyLightLeak 取 max 后写入 GBufferAO；0=可全黑，0.2=默认，1=不压暗。\n"),
 	ECVF_RenderThreadSafe);
 
 // 探针 Ray Miss 时天空贡献倍率（Raster SH / Cubemap）
 static TAutoConsoleVariable<float> CVarSkyOnMissIntensity(
 	TEXT("r.RTXGI.DDGI.SkyOnMiss.Intensity"),
-	1.0f,
+	0.0f,
 	TEXT("探针射线 miss 时天空光强度倍率。>1 更亮的天空进 DDGI，0=等同 None。\n"),
 	ECVF_RenderThreadSafe);
 

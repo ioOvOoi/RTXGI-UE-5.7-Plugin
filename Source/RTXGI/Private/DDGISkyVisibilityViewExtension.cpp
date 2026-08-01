@@ -90,7 +90,7 @@ namespace
 	static float GetSoftLeak()
 	{
 		static const auto* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"));
-		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.2f;
+		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.5f;
 	}
 }
 
