@@ -204,7 +204,7 @@ public:
 		EDDGIVolumeMode Mode = EDDGIVolumeMode::Runtime; // Volume operational mode
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
 		float SkyVisibilityIntensity = 1.0f;
-		float SkyLightLeak = 0.5f;
+		float SkyLightLeak = 0.0f;
 		float SkyOnMissIntensity = 0.0f;
 		bool bForceUpdate = false;
 	};
@@ -511,10 +511,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
 	float SkyVisibilityIntensity = 1.0f;
 
-	// 封闭区 openness 下限（0=可压死黑，0.5=默认半开）。只影响「被遮挡」像素；见天处仍为 1。
-	// 写入 GBuffer 时用 min，绝不会把 AO/亮度抬到高于原值。
+	// 封闭区 openness 下限。0=完全挡住天光（默认，遮蔽目标）；>0 时封闭区仍留一点 AO 避免死黑。
+	// 只降低 GBufferAO（天光读此通道），见天处仍为 1。GBuffer 用 min，绝不提亮。
 	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
-	float SkyLightLeak = 0.5f;
+	float SkyLightLeak = 0.0f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")

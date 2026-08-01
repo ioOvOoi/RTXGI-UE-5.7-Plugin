@@ -2,6 +2,7 @@
 * Copyright (c) 2019-2022, NVIDIA CORPORATION.  All rights reserved.
 *
 * 全分辨率 composite：采样低分辨率 skyVis，min 写入 GBufferC.a（GBufferAO）。
+* 这是挡引擎 SkyLight 的主路径（SkyLighting 读 GBufferAO）；不是用来压 DDGI 的。
 *
 * 为什么 min：保护材质自带 AO，只允许更暗不能更亮（与 DFAO/SSAO 合成习惯一致）。
 * 为什么 UAV RMW、禁止再绑 GBufferC SRV：同资源 SRV+UAV 未定义；用 TypedUAVLoad 读-改-写 .a。

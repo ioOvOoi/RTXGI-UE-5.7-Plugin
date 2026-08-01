@@ -244,9 +244,8 @@ void MainCS(uint3 DispatchThreadID : SV_DispatchThreadID)
 
     float PreExposure = ShouldUsePreExposure ? View.PreExposure : 1.0f;
 
-    // Reader：GBufferC.a 已由 writer 写入最终 openness（含 per-vol intensity + SoftLeak）。
-    // 此处只用全局 Intensity 控制 DDGI 间接是否跟随 AO；不再二次 max(Leak)。
-    // SkyVisibilityEnable 仅在本帧确实有有效 sky-vis volume 时置 1。
+    // 可选：用已写入的 GBufferAO 再乘 DDGI。默认 C++ 侧 SkyVisibilityEnable=0（AffectDDGI 关），
+    // 因为封闭区 DDGI 往往已黑，主目标是挡天光而非再压间接。
     if (SkyVisibilityEnable != 0)
     {
         float gBufferAO = BaseColorTexture.SampleLevel(PointClampSampler, BufferUV, 0).a;

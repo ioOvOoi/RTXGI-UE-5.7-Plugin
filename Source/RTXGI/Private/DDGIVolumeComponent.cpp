@@ -64,6 +64,14 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityIntensity(
 	TEXT("Global sky visibility intensity. 0 = no darkening, 1 = full. Multiplied with per-volume intensity.\n"),
 	ECVF_RenderThreadSafe);
 
+// 是否用 sky-vis 再乘 DDGI 间接。默认 0：只挡天光(GBufferAO)，不把已黑的 DDGI 再压暗。
+static TAutoConsoleVariable<int32> CVarSkyVisibilityAffectDDGI(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.AffectDDGI"),
+	0,
+	TEXT("1=用 GBufferAO 再乘 DDGI 间接光；0=默认只写 AO 供 SkyLight 遮蔽，不改 DDGI 亮度。
+"),
+	ECVF_RenderThreadSafe);
+
 static TAutoConsoleVariable<float> CVarSkyVisibilityResolutionScale(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.ResolutionScale"),
 	0.75f,
@@ -98,8 +106,9 @@ static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
 // 天空光泄露：遮挡处仍保留的最低开阔度，避免室内过黑（类 Lumen 可调漏光）
 static TAutoConsoleVariable<float> CVarSkyVisibilityLeak(
 	TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"),
-	0.5f,
-	TEXT("全局天空光泄露地板 [0,1]。与 volume.SkyLightLeak 取 max 后写入 GBufferAO；0=可全黑，0.2=默认，1=不压暗。\n"),
+	0.0f,
+	TEXT("封闭区 GBufferAO 下限。0=完全挡天光(默认)；>0 封闭区仍透一点天光。见天像素仍为 1，且 min 写入不提亮。
+"),
 	ECVF_RenderThreadSafe);
 
 // 探针 Ray Miss 时天空贡献倍率（Raster SH / Cubemap）
@@ -818,7 +827,9 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 					break;
 				}
 			}
-			PassParameters->SkyVisibilityEnable = (CVarSkyVisibility.GetValueOnRenderThread() && bAnySkyVisVolume) ? 1 : 0;
+			// 默认不影响 DDGI：只写 GBufferAO 挡天光。AffectDDGI=1 才在 ApplyLighting 乘 AO。
+			const bool bAffectDDGI = CVarSkyVisibilityAffectDDGI.GetValueOnRenderThread() != 0;
+			PassParameters->SkyVisibilityEnable = (CVarSkyVisibility.GetValueOnRenderThread() && bAnySkyVisVolume && bAffectDDGI) ? 1 : 0;
 			PassParameters->SkyVisibilityIntensity = CVarSkyVisibilityIntensity.GetValueOnRenderThread();
 			PassParameters->ChebyshevFloor = CVarChebyshevFloor.GetValueOnRenderThread();
 

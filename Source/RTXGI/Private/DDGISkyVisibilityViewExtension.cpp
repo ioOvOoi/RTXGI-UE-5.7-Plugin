@@ -24,6 +24,8 @@
 #include "ShaderParameterStruct.h"
 #include "SystemTextures.h"
 
+// 主目标：写 GBufferAO，让引擎 SkyLight 在封闭区衰减（挡天光）。
+// 默认不乘 DDGI（AffectDDGI=0）：室内探针间接往往已暗，再压会错。
 DECLARE_GPU_STAT_NAMED(RTXGI_SkyVisibility, TEXT("RTXGI Sky Visibility"));
 
 // CVar 在 DDGIVolumeComponent.cpp 用 TAutoConsoleVariable 唯一注册（对齐原 DDGI）。
@@ -90,7 +92,7 @@ namespace
 	static float GetSoftLeak()
 	{
 		static const auto* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SkyVisibility.Leak"));
-		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.5f;
+		return CVar ? FMath::Clamp(CVar->GetFloat(), 0.0f, 1.0f) : 0.0f;
 	}
 }
 
