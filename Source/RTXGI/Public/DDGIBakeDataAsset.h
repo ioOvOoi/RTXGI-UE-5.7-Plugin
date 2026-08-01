@@ -67,7 +67,7 @@ struct FDDGIBakeTexturePayload
 
 /**
  * A cookable primary data asset holding a complete DDGI volume snapshot.
- * Stores 5 inline texture payloads (Irradiance, Distance, Offsets, States, SGAmplitudes)
+ * Stores 4 inline texture payloads (Irradiance, Distance, Offsets, States)
  * plus bake configuration metadata.
  *
  * Saved under <MapName>/DDGIBakes/ for per-map bake management.
@@ -92,9 +92,6 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Bake Data")
 	FDDGIBakeTexturePayload States;
 
-	UPROPERTY(VisibleAnywhere, Category = "Bake Data")
-	FDDGIBakeTexturePayload SGAmplitudes;
-
 	// --- Metadata for validation on load ---
 
 	UPROPERTY(VisibleAnywhere, Category = "Bake Metadata")
@@ -102,9 +99,6 @@ public:
 
 	UPROPERTY(VisibleAnywhere, Category = "Bake Metadata")
 	int32 RaysPerProbe = 0;
-
-	UPROPERTY(VisibleAnywhere, Category = "Bake Metadata")
-	int32 SGLobeCount = 0;
 
 	UPROPERTY(VisibleAnywhere, Category = "Bake Metadata")
 	bool bEnableProbeRelocation = false;

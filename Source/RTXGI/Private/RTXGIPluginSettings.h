@@ -36,7 +36,6 @@ enum class EDDGIProbesVisulizationMode : uint8
 	irrad UMETA(DisplayName = "Irradiance"),
 	distr UMETA(DisplayName = "Squared Hit Distance"),
 	distg UMETA(DisplayName = "Hit Distance"),
-	sg UMETA(DisplayName = "SG Reconstructed Radiance")
 };
 
 /**

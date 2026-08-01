@@ -301,7 +301,8 @@ RAY_TRACING_ENTRY_RAYGEN(ProbeUpdateRGS)
             surfaceBias,
             Payload.WorldNormal,
             DDGIVolume_0,
-            resources
+            resources,
+            0.05f
         );
 
         // Perfectly diffuse reflectors don't exist in the real world. Limit the BRDF

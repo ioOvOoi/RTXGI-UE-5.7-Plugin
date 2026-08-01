@@ -14,7 +14,7 @@
 // Per-texel lerp between current and next bake textures.
 // Used for DDGI crossfade at runtime with zero ray-tracing cost.
 // Format-agnostic: reads/writes float4 regardless of the underlying texture format.
-// Handles: Irradiance, Distance, Offsets, SGAmplitudes.
+// Handles: Irradiance, Distance, Offsets.
 // States texture is NOT handled by this shader — copied separately via AddCopyTexturePass.
 // ponytail: Distance textures are 2-channel (G32R32F/G16R16F) — RHI zero-fills missing
 // SRV channels (.zw=0) and discards extra UAV channels on write. The float4 lerp is

@@ -94,10 +94,6 @@ struct FDDGITextureLoadContext
 	FDDGITexturePixels Distance;
 	FDDGITexturePixels Offsets;
 	FDDGITexturePixels States;
-	// ponytail: SG amplitude atlas is optional — only populated when bSGEnabled
-	// at save time and CustomVer >= SaveLoadSGAmplitudes at load time. Cleared
-	// automatically by Clear() since it reassigns *this = FDDGITextureLoadContext().
-	FDDGITexturePixels SGAmplitudes;
 
 	void Clear()
 	{
@@ -159,8 +155,6 @@ public:
 		static const EPixelFormat c_pixelFormatRadianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatIrradianceLowBitDepth = EPixelFormat::PF_A2B10G10R10;
 		static const EPixelFormat c_pixelFormatIrradianceHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
-		static const EPixelFormat c_pixelFormatSGAmplitudesLowBitDepth = EPixelFormat::PF_FloatRGBA;
-		static const EPixelFormat c_pixelFormatSGAmplitudesHighBitDepth = EPixelFormat::PF_A32B32G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceHighBitDepth = EPixelFormat::PF_G32R32F;
 		static const EPixelFormat c_pixelFormatDistanceLowBitDepth = EPixelFormat::PF_G16R16F;
 		static const EPixelFormat c_pixelFormatOffsets = EPixelFormat::PF_A16B16G16R16;
@@ -209,30 +203,22 @@ public:
 		float LightingMultiplier = 1.0f;
 		EDDGIVolumeMode Mode = EDDGIVolumeMode::Runtime; // Volume operational mode
 		EDDGISkyLightType SkyLightTypeOnRayMiss = EDDGISkyLightType::Raster;
-		bool bSGEnabled = false;
-		int32 SGLightingMode = 0;
-		int32 SGLobeCount = 16;
-		int32 SGPrecision = 0;
-		bool bSGDiffuseEnabled = true;
-		bool bSGSpecularEnabled = true;
-		float SGHysteresis = 0.95f;
-		float SGSpecularMinRoughness = -1.0f;
+		float SkyVisibilityIntensity = 1.0f;
 		bool bForceUpdate = false;
 	};
 	FComponentData ComponentData;
 	FDDGITextureLoadContext TextureLoadContext;
 
 	TRefCountPtr<IPooledRenderTarget> ProbesIrradiance;
-	TRefCountPtr<IPooledRenderTarget> ProbesSGAmplitudes;
 	TRefCountPtr<IPooledRenderTarget> ProbesDistance;
 	TRefCountPtr<IPooledRenderTarget> ProbesOffsets;
 	TRefCountPtr<IPooledRenderTarget> ProbesStates;
 	TRefCountPtr<IPooledRenderTarget> ProbesSpace;
 
 	// --- Bake crossfade textures (transient, only populated during crossfade) ---
-	// Indexed as: [0]=Irradiance, [1]=Distance, [2]=Offsets, [3]=SGAmplitudes
-	TRefCountPtr<FRHITexture> CurrentBakeSRVs[4];
-	TRefCountPtr<FRHITexture> NextBakeSRVs[4];
+	// Indexed as: [0]=Irradiance, [1]=Distance, [2]=Offsets
+	TRefCountPtr<FRHITexture> CurrentBakeSRVs[3];
+	TRefCountPtr<FRHITexture> NextBakeSRVs[3];
 	// Separate SRV for states (copied rather than blended)
 	TRefCountPtr<FRHITexture> CurrentBakeStatesSRV;
 	float BakeBlendStartTime = 0.0f;
@@ -290,10 +276,6 @@ static FIntPoint GetDistanceTextureDimensions(FIntVector ProbeCounts)
 	return Get2DProbeCount(ProbeCounts) * (FDDGIVolumeSceneProxy::FComponentData::c_NumTexelsDistance + 2);
 }
 
-static FIntPoint GetSGAmplitudeTextureDimensions(FIntVector ProbeCounts, int32 SGLobeCount)
-{
-	return FIntPoint(Get2DProbeCount(ProbeCounts).X * FMath::Clamp(SGLobeCount, 4, 32), Get2DProbeCount(ProbeCounts).Y);
-}
 
 static int32 GetProbeCount(FIntVector ProbeCounts)
 {
@@ -516,39 +498,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "GI Lighting")
 	FLightingChannels LightingChannels;
 
-	// --- "SG Lighting" properties
 
-	// Enables SG radiance metadata for this volume. SG rendering work remains disabled until SG passes are implemented and selected.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
-	bool bSGEnabled = false;
+	// --- "Sky Visibility Occlusion" properties
 
-	// SG lighting mode. 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG directional radiance debug.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "5", UIMin = "0", UIMax = "5"))
-	int32 SGLightingMode = 0;
-
-	// Number of runtime Fibonacci SG lobes per probe. Higher counts improve directional detail at higher GPU/memory cost.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "4", ClampMax = "32", UIMin = "4", UIMax = "32"))
-	int32 SGLobeCount = 16;
-
-	// SG amplitude precision target. 0=FP16 target, 1=FP32 validation target.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
-	int32 SGPrecision = 0;
-
-	// Enables SG diffuse evaluation once SG lighting passes exist.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
-	bool bSGDiffuseEnabled = true;
-
-	// Enables SG rough specular evaluation once SG lighting passes exist.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting")
-	bool bSGSpecularEnabled = true;
-
-	// Temporal hysteresis target for future SG amplitude accumulation.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "0", ClampMax = "1"))
-	float SGHysteresis = 0.95f;
-
-	// SG specular roughness override. -1 uses material roughness from GBuffer; 0..1 forces a debug roughness value.
-	UPROPERTY(EditAnywhere, Category = "SG Lighting", meta = (ClampMin = "-1", ClampMax = "1", UIMin = "-1", UIMax = "1"))
-	float SGSpecularMinRoughness = -1.0f;
+	// Per-volume sky visibility intensity. 0=no large-scale occlusion, 1=full. Multiplied with global r.RTXGI.DDGI.SkyVisibility.Intensity. Useful to weaken distant volumes.
+	UPROPERTY(EditAnywhere, Category = "Sky Visibility", meta = (ClampMin = "0", ClampMax = "1", UIMin = "0", UIMax = "1"))
+	float SkyVisibilityIntensity = 1.0f;
 
 	// Blueprint Nodes
 	UFUNCTION(BlueprintCallable, Category = "DDGI")

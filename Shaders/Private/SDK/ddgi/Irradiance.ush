@@ -73,7 +73,8 @@ float3 DDGIGetVolumeIrradiance(
     float3 surfaceBias,
     float3 direction,
     DDGIVolumeDescGPU volume,
-    DDGIVolumeResources resources)
+    DDGIVolumeResources resources,
+    float chebyshevFloor)
 {
     float3 irradiance = float3(0.f, 0.f, 0.f);
     float  accumulatedWeights = 0.f;
@@ -177,7 +178,8 @@ float3 DDGIGetVolumeIrradiance(
 
         // Avoid visibility weights ever going all the way to zero because
         // when *no* probe has visibility we need a fallback value
-        weight *= max(0.05f, chebyshevWeight);
+        // ponytail: floor from CVar so sky visibility owns large-scale occlusion
+        weight *= max(chebyshevFloor, chebyshevWeight);
 
         // Avoid a weight of zero
         weight = max(0.000001f, weight);
@@ -223,6 +225,120 @@ float3 DDGIGetVolumeIrradiance(
 #endif
 
     return irradiance;
+}
+
+/**
+* Builds an orthonormal basis with Z = normal (for hemisphere sampling).
+*/
+float3x3 DDGIGetNormalBasis(float3 normal)
+{
+    float3 up = (abs(normal.z) < 0.999f) ? float3(0.f, 0.f, 1.f) : float3(1.f, 0.f, 0.f);
+    float3 tangent = normalize(cross(up, normal));
+    float3 bitangent = cross(normal, tangent);
+    return float3x3(tangent, bitangent, normal);
+}
+
+/**
+* 半球均匀方向 i/N，朝 surfaceNormal。
+* SampleCount=1 退化为法线；否则复用 DDGISphericalFibonacci 并折叠到 +Z 半球再旋转到法线。
+* 为什么用 Fibonacci 而非 cosine-weighted：openspec design D3 / spec「半球均匀」要求均匀立体角，不是 BRDF 余弦加权。
+*/
+float3 DDGIGetSkyVisibilitySampleDirection(float3 surfaceNormal, int sampleIndex, int sampleCount)
+{
+    if (sampleCount <= 1)
+    {
+        return surfaceNormal;
+    }
+
+    // 全球 Fibonacci → |z| 折叠到上半球 → 与法线对齐
+    float3 sphereDir = DDGISphericalFibonacci(float(sampleIndex), float(sampleCount));
+    float3 localDir = normalize(float3(sphereDir.x, sphereDir.y, abs(sphereDir.z)));
+    return normalize(mul(localDir, DDGIGetNormalBasis(surfaceNormal)));
+}
+
+/**
+* 中远距天光开阔度 [0,1]：读探针 distance（非 DFAO 体素）。
+* 为什么 soft 而不是二值 miss：二值只有「见天/不见天」，中距离软影被砍掉；
+* softNear→softFar 的 smoothstep 才能压过大场景 DFAO 斑点并做出峡谷/大厅渐暗。
+* sky-miss(>1e10) = 1；有限命中按距离在 [softNear, softFar] 插值。
+*/
+float DDGIEncodeSoftSkyOpenness(float meanDistance, float softNear, float softFar)
+{
+    if (meanDistance > 1e10f)
+    {
+        return 1.f;
+    }
+    float nearD = max(softNear, 1.f);
+    float farD = max(softFar, nearD + 1.f);
+    return smoothstep(nearD, farD, meanDistance);
+}
+
+float DDGIGetVolumeSkyVisibility(
+    float3 worldPosition,
+    float3 surfaceNormal,
+    DDGIVolumeDescGPU volume,
+    DDGIVolumeResources resources,
+    int sampleCount,
+    float softNear,
+    float softFar,
+    float worldUpBias)
+{
+    int clampedSampleCount = clamp(sampleCount, 1, 16);
+    float accumulatedVisibility = 0.f;
+    float accumulatedWeights = 0.f;
+
+    // 采样轴：略混 world-up，增强「天光」方向中远距遮蔽（墙面仍保留法线半球）
+    // UE Z-up
+    float3 sampleAxis = normalize(lerp(surfaceNormal, float3(0.f, 0.f, 1.f), saturate(worldUpBias)));
+
+    int3 baseProbeCoords = DDGIGetBaseProbeGridCoords(worldPosition, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+    float3 baseProbeWorldPosition = DDGIGetProbeWorldPosition(baseProbeCoords, volume.origin, volume.rotation, volume.probeGridCounts, volume.probeGridSpacing);
+    float3 distanceVolumeSpace = RTXGIQuaternionRotate(worldPosition - baseProbeWorldPosition, RTXGIQuaternionConjugate(volume.rotation));
+    float3 alpha = clamp((distanceVolumeSpace / volume.probeGridSpacing), float3(0.f, 0.f, 0.f), float3(1.f, 1.f, 1.f));
+
+    for (int probeIndex = 0; probeIndex < 8; probeIndex++)
+    {
+        int3 adjacentProbeOffset = int3(probeIndex, probeIndex >> 1, probeIndex >> 2) & int3(1, 1, 1);
+        int3 adjacentProbeCoords = clamp(baseProbeCoords + adjacentProbeOffset, int3(0, 0, 0), volume.probeGridCounts - int3(1, 1, 1));
+        int adjacentProbeIndex = DDGIGetProbeIndex(adjacentProbeCoords, volume.probeGridCounts);
+
+    #if RTXGI_DDGI_PROBE_CLASSIFICATION
+        {
+            #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+                int stateProbeIndex = DDGIGetProbeIndexOffset(adjacentProbeIndex, volume.probeGridCounts, volume.probeScrollOffsets);
+            #else
+                int stateProbeIndex = adjacentProbeIndex;
+            #endif
+            int2 texelPosition = DDGIGetProbeTexelPosition(stateProbeIndex, volume.probeGridCounts);
+            int probeState = resources.probeStatesSRV[texelPosition];
+            if (probeState == PROBE_STATE_INACTIVE) continue;
+        }
+    #endif
+
+        float3 trilinear = max(0.001f, lerp(1.f - alpha, alpha, adjacentProbeOffset));
+        float trilinearWeight = (trilinear.x * trilinear.y * trilinear.z);
+
+        float probeSkyVisibility = 0.f;
+        for (int sampleIndex = 0; sampleIndex < clampedSampleCount; sampleIndex++)
+        {
+            float3 sampleDir = DDGIGetSkyVisibilitySampleDirection(sampleAxis, sampleIndex, clampedSampleCount);
+            float2 octantCoords = DDGIGetOctahedralCoordinates(sampleDir);
+        #if RTXGI_DDGI_INFINITE_SCROLLING_VOLUME
+            float2 probeTextureCoords = DDGIGetProbeUV(adjacentProbeIndex, octantCoords, volume.probeGridCounts, volume.probeNumDistanceTexels, volume.probeScrollOffsets);
+        #else
+            float2 probeTextureCoords = DDGIGetProbeUV(adjacentProbeIndex, octantCoords, volume.probeGridCounts, volume.probeNumDistanceTexels);
+        #endif
+            float meanDistance = resources.probeDistanceSRV.SampleLevel(resources.bilinearSampler, probeTextureCoords, 0).r;
+            probeSkyVisibility += DDGIEncodeSoftSkyOpenness(meanDistance, softNear, softFar);
+        }
+        probeSkyVisibility *= (1.f / float(clampedSampleCount));
+
+        accumulatedVisibility += probeSkyVisibility * trilinearWeight;
+        accumulatedWeights += trilinearWeight;
+    }
+
+    if (accumulatedWeights == 0.f) return 1.f;
+    return saturate(accumulatedVisibility / accumulatedWeights);
 }
 
 #endif // RTXGI_DDGI_IRRADIANCE_HLSL

@@ -35,10 +35,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeVisualizeShaderParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeDistanceTexture)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeOffsets)
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, ProbeStates)
-	// ponytail: SG amplitude atlas for Mode 4 (SG reconstructed radiance debug).
-	// Null when bSGEnabled=false on the volume; the PS guards the Mode 4 branch
-	// on SGLobeCount > 0 so a null texture is never sampled.
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeSGAmplitudesTexture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, ProbeSampler)
 	SHADER_PARAMETER(int, Mode)
 	SHADER_PARAMETER(float, ProbeRadius)
@@ -56,10 +52,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeVisualizeShaderParameters, )
 	SHADER_PARAMETER(int32, ShouldUsePreExposure)
 	SHADER_PARAMETER(FIntVector, VolumeProbeScrollOffsets)
 	SHADER_PARAMETER(float, IrradianceScalar)
-	// ponytail: SG debug params — SGLobeCount drives the inner-product loop and
-	// the atlas row stride. Atlas dimensions are derived from ProbeGridCounts
-	// and SGLobeCount (see GetSGAmplitudeTextureDimensions).
-	SHADER_PARAMETER(int32, SGLobeCount)
 	RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
@@ -358,14 +350,6 @@ PassParameters->ProbeIrradianceTexture = GraphBuilder.RegisterExternalTexture(pr
 		PassParameters->ProbeDistanceTexture = GraphBuilder.RegisterExternalTexture(proxy->ProbesDistance);
 		PassParameters->ProbeOffsets = RegisterExternalTextureWithFallback(GraphBuilder, proxy->ProbesOffsets, GSystemTextures.BlackDummy);
 		PassParameters->ProbeStates = RegisterExternalTextureWithFallback(GraphBuilder, proxy->ProbesStates, GSystemTextures.BlackDummy);
-		// ponytail: SG amplitude atlas — fallback to black when SG is disabled on this
-		// volume. The PS Mode 4 branch guards on SGLobeCount > 0, so the black texture is
-		// never sampled in that case. When SG IS enabled, the real atlas is bound and
-		// Mode 4 reads per-lobe amplitudes from it.
-		PassParameters->ProbeSGAmplitudesTexture = RegisterExternalTextureWithFallback(GraphBuilder, proxy->ProbesSGAmplitudes, GSystemTextures.BlackDummy);
-		PassParameters->SGLobeCount = (proxy->ComponentData.bSGEnabled && proxy->ProbesSGAmplitudes)
-			? FMath::Clamp(proxy->ComponentData.SGLobeCount, 4, 32)
-			: 0;
 		PassParameters->ProbeRadius = probeRadius;
 		PassParameters->DepthScale = depthScale;
 		PassParameters->WorldToClip = static_cast<FMatrix44f>(View.ViewMatrices.GetViewProjectionMatrix());

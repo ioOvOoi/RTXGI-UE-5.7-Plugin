@@ -9,6 +9,7 @@
 */
 
 #include "DDGIVolumeComponent.h"
+#include "DDGISkyVisibilitySubsystem.h"
 #include "DDGIVolume.h"
 #include "DDGIVolumeUpdate.h"
 
@@ -41,12 +42,64 @@
 DECLARE_GPU_STAT_NAMED(RTXGI_Update, TEXT("RTXGI Update"));
 DECLARE_GPU_STAT_NAMED(RTXGI_ApplyLighting, TEXT("RTXGI Apply Lighting"));
 DECLARE_GPU_STAT_NAMED(RTXGI_UpscaleLighting, TEXT("RTXGI Upscale Lighting"));
-DECLARE_GPU_STAT_NAMED(RTXGI_SGApplyLighting, TEXT("RTXGI SG Apply Lighting"));
 
 static TAutoConsoleVariable<bool> CVarUseDDGI(
 	TEXT("r.RTXGI.DDGI"),
 	true,
 	TEXT("If false, this will disable the lighting contribution and functionality of DDGI volumes.\n"),
+	ECVF_RenderThreadSafe);
+
+// ponytail: Sky visibility from probe distance — large-scale occlusion replacing DFAO
+static TAutoConsoleVariable<bool> CVarSkyVisibility(
+	TEXT("r.RTXGI.DDGI.SkyVisibility"),
+	true,
+	TEXT("Enable sky visibility from probe distance texture. Modulates indirect light and writes GBufferAO for SkyLight pass. Replaces DFAO for large-scale occlusion without SDF voxel noise.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilityIntensity(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.Intensity"),
+	1.0f,
+	TEXT("Global sky visibility intensity. 0 = no darkening, 1 = full. Multiplied with per-volume intensity.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilityResolutionScale(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.ResolutionScale"),
+	0.75f,
+	TEXT("Resolution scale for the sky visibility GBufferAO compute pass. 0.25=coarse/cheap, 0.5=default, 1.0=full res. Low-frequency signal, 0.5 is usually enough.\n"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<int32> CVarSkyVisibilitySampleCount(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.SampleCount"),
+	8,
+	TEXT("Number of hemisphere directions sampled per pixel for sky visibility. 1=normal only (inaccurate on walls), 4/8/16=hemisphere integration. 8 is default.\n"),
+	ECVF_RenderThreadSafe);
+
+// 中远距 soft 开阔度（cm）。比 DFAO 更稳的大尺度渐暗：有限命中按距离插值，而非二值见天
+static TAutoConsoleVariable<float> CVarSkyVisibilitySoftNear(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.SoftNear"),
+	300.0f,
+	TEXT("Soft sky openness near distance in cm. Hits closer than this count as fully occluded (vis~0). Default 300 (~3m).
+"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilitySoftFar(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.SoftFar"),
+	8000.0f,
+	TEXT("Soft sky openness far distance in cm. Hits beyond this approach fully open (vis~1); sky-miss is always 1. Default 8000 (~80m) for mid/long-range vs DFAO.
+"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarSkyVisibilityWorldUpBias(
+	TEXT("r.RTXGI.DDGI.SkyVisibility.WorldUpBias"),
+	0.35f,
+	TEXT("Blend sample axis toward world +Z for sky-dominant mid-range occlusion. 0=surface normal only, 1=world up only. Default 0.35.
+"),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarChebyshevFloor(
+	TEXT("r.RTXGI.DDGI.ChebyshevFloor"),
+	0.5f,
+	TEXT("Chebyshev visibility weight floor. 0.05=original (strong occlusion, light leak protection), 0.5=default (weakened, lets sky visibility take over large-scale occlusion), 0.8=minimal. Probe update path always uses 0.05.\n"),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarLightingPassScale(
@@ -73,54 +126,6 @@ static TAutoConsoleVariable<int> CVarStatVolume(
 	TEXT("The index for which volume's STAT is displayed\n"),
 	ECVF_RenderThreadSafe | ECVF_Cheat);
 
-static TAutoConsoleVariable<bool> CVarSGEnable(
-	TEXT("r.RTXGI.DDGI.SG.Enable"),
-	false,
-	TEXT("Enable SG radiance metadata and future SG lighting passes. Default is disabled, preserving octahedral DDGI lighting.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<int32> CVarSGLightingMode(
-	TEXT("r.RTXGI.DDGI.SG.LightingMode"),
-	-1,
-	TEXT("SG DDGI lighting mode override. -1=Use Volume panel, 0=Octa irradiance, 1=SG diffuse, 2=SG diffuse + rough specular, 3=SG specular debug only, 4=SG vs octa difference, 5=SG radiance direction debug.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<int32> CVarSGLobeCount(
-	TEXT("r.RTXGI.DDGI.SG.LobeCount"),
-	-1,
-	TEXT("SG lobe count override. -1=use Volume panel value, 4..32=force runtime Fibonacci SG lobe count.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<int32> CVarSGPrecision(
-	TEXT("r.RTXGI.DDGI.SG.Precision"),
-	0,
-	TEXT("SG amplitude precision. 0=FP16 target, 1=FP32 validation target.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<bool> CVarSGDiffuse(
-	TEXT("r.RTXGI.DDGI.SG.Diffuse"),
-	true,
-	TEXT("Enable SG diffuse evaluation when an SG lighting mode is selected.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<bool> CVarSGSpecular(
-	TEXT("r.RTXGI.DDGI.SG.Specular"),
-	true,
-	TEXT("Enable SG rough specular evaluation when an SG lighting mode is selected.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<float> CVarSGHysteresis(
-	TEXT("r.RTXGI.DDGI.SG.Hysteresis"),
-	0.95f,
-	TEXT("Temporal hysteresis for future SG amplitude accumulation. 0 uses only new projection, 1 keeps history.\n"),
-	ECVF_RenderThreadSafe);
-
-static TAutoConsoleVariable<float> CVarSGSpecularMinRoughness(
-	TEXT("r.RTXGI.DDGI.SG.Specular.MinRoughness"),
-	-1.0f,
-	TEXT("SG specular roughness override. -1=use material roughness from GBuffer, 0..1=force debug roughness for all materials.\n"),
-	ECVF_RenderThreadSafe);
-
 //static FCriticalSection GDDGIReadbackCS;
 //static TMap<FDDGITexturePixels*, TUniquePtr<FRHIGPUTextureReadback>> GDDGIReadbacks;
 
@@ -145,13 +150,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FVolumeData, )
 	SHADER_PARAMETER(float, BlendDistanceBlack)
 	SHADER_PARAMETER(float, ApplyLighting)
 	SHADER_PARAMETER(float, IrradianceScalar)
-// SG metadata per volume (no SRV cost)
-	SHADER_PARAMETER(int, SGLobeCount)
-	SHADER_PARAMETER(int, SGLightingMode)
-	SHADER_PARAMETER(float, SGSpecularRoughness)
-	// ponytail: SG diffuse/specular toggles consumed by ApplyVolumeLightingContribution
-	SHADER_PARAMETER(int, bSGDiffuseEnabled)
-	SHADER_PARAMETER(int, bSGSpecularEnabled)
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
@@ -167,8 +165,9 @@ BEGIN_SHADER_PARAMETER_STRUCT(FApplyLightingDeferredShaderParameters, )
 	SHADER_PARAMETER(FIntPoint, ScaledViewOffset)
 	SHADER_PARAMETER(int32, ShouldUsePreExposure)
 	SHADER_PARAMETER(int32, NumVolumes)
-	// Global SG amplitude texture (single slot, avoids per-volume SRV overflow)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ProbeSGTexture)
+	SHADER_PARAMETER(int32, SkyVisibilityEnable)
+	SHADER_PARAMETER(float, SkyVisibilityIntensity)
+	SHADER_PARAMETER(float, ChebyshevFloor)
 	// Volumes are sorted from densest probes to least dense probes
 	SHADER_PARAMETER_STRUCT_ARRAY(FVolumeData, DDGIVolume, [FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_MAX_SHADING_VOLUMES])
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
@@ -216,7 +215,6 @@ public:
 		OutEnvironment.SetDefine(TEXT("VOLUME_LIST"), volumeMacroList.GetCharArray().GetData());
 
 		OutEnvironment.SetDefine(TEXT("RTXGI_DDGI_PROBE_CLASSIFICATION"), FDDGIVolumeSceneProxy::FComponentData::c_RTXGI_DDGI_PROBE_CLASSIFICATION ? 1 : 0);
-		OutEnvironment.SetDefine(TEXT("RTXGI_MAX_SG_LOBE_COUNT"), 32);
 
 		// needed for a typed UAV load. This already assumes we are raytracing, so should be fine.
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowTypedUAVLoads);
@@ -358,23 +356,6 @@ void FDDGIVolumeSceneProxy::ReallocateSurfaces_RenderThread(FRHICommandListImmed
 #endif
 	}
 
-	// SG amplitudes - allocated only when SG metadata is enabled. Default DDGI keeps this released.
-	if (ComponentData.bSGEnabled)
-	{
-		FIntPoint ProxyTexDims = GetSGAmplitudeTextureDimensions(ComponentData.ProbeCounts, ComponentData.SGLobeCount);
-		EPixelFormat Format = (ComponentData.SGPrecision == 1) ? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth : FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
-
-		FPooledRenderTargetDesc Desc(FPooledRenderTargetDesc::Create2DDesc(ProxyTexDims, Format, FClearValueBinding::Transparent, TexCreate_None, TexCreate_ShaderResource | TexCreate_UAV, false));
-#if ENGINE_MAJOR_VERSION < 5
-		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, ProbesSGAmplitudes, TEXT("DDGISGAmplitudes"), ERenderTargetTransience::NonTransient);
-#else
-		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, ProbesSGAmplitudes, TEXT("DDGISGAmplitudes"));
-#endif
-	}
-	else
-	{
-		ProbesSGAmplitudes.SafeRelease();
-	}
 
 	// Distance
 	{
@@ -444,10 +425,6 @@ void FDDGIVolumeSceneProxy::ResetTextures_RenderThread(FRDGBuilder& GraphBuilder
 {
 	float ClearColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesIrradiance)), ClearColor);
-	if (ProbesSGAmplitudes)
-	{
-		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesSGAmplitudes)), ClearColor);
-	}
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(ProbesDistance)), ClearColor);
 
 	if (ProbesOffsets)
@@ -813,7 +790,9 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
-			PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+			PassParameters->SkyVisibilityEnable = CVarSkyVisibility.GetValueOnRenderThread() ? 1 : 0;
+			PassParameters->SkyVisibilityIntensity = CVarSkyVisibilityIntensity.GetValueOnRenderThread();
+			PassParameters->ChebyshevFloor = CVarChebyshevFloor.GetValueOnRenderThread();
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 			DECLARE_DWORD_COUNTER_STAT(TEXT("Total Number of Volumes: "), TOTAL_VOLUME, STATGROUP_RTXGI);
@@ -870,24 +849,6 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				// Apply the lighting multiplier to artificially lighten or darken the indirect light from the volume
 				PassParameters->DDGIVolume[volumeIndex].IrradianceScalar /= volumeProxy->ComponentData.LightingMultiplier;
 
-// SG lighting parameters
-			PassParameters->DDGIVolume[volumeIndex].SGLobeCount = FMath::Clamp(volumeProxy->ComponentData.SGLobeCount, 4, 32);
-			PassParameters->DDGIVolume[volumeIndex].SGSpecularRoughness = FMath::Clamp(volumeProxy->ComponentData.SGSpecularMinRoughness, -1.0f, 1.0f);
-			PassParameters->DDGIVolume[volumeIndex].bSGDiffuseEnabled = volumeProxy->ComponentData.bSGDiffuseEnabled ? 1 : 0;
-			PassParameters->DDGIVolume[volumeIndex].bSGSpecularEnabled = volumeProxy->ComponentData.bSGSpecularEnabled ? 1 : 0;
-			// CVar lighting mode override. -1 means use the Volume panel value.
-			{
-				static IConsoleVariable* CVarSGLightingModeRT = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.SG.LightingMode"));
-				const int32 LightingModeOverride = CVarSGLightingModeRT ? CVarSGLightingModeRT->GetInt() : -1;
-				PassParameters->DDGIVolume[volumeIndex].SGLightingMode =
-					(LightingModeOverride >= 0) ? LightingModeOverride : volumeProxy->ComponentData.SGLightingMode;
-			}
-
-				// Bind global SG amplitude texture (last SG volume wins, fine for single-volume case)
-				if (volumeProxy->ProbesSGAmplitudes)
-				{
-					PassParameters->ProbeSGTexture = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesSGAmplitudes);
-				}
 				
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 				uint32 raysPerProbe = GetNumRaysPerProbe(volumeProxy->ComponentData.RaysPerProbe);
@@ -1060,7 +1021,8 @@ struct RTXGI_API FDDGICustomVersion
 		SaveLoadProbeTextures,     // save pixels and width/height
 		SaveLoadProbeTexturesFmt,  // save texel format since the format can change in the project settings
 		SaveLoadProbeDataIsOptional, // Probe data is optionally stored depending on project settings
-		SaveLoadSGAmplitudes,      // save/load SG amplitude atlas alongside the four octa probe textures
+		// ponytail: keep ordinal for assets that once wrote SG atlas; never write SG again
+		SaveLoadSGAmplitudes,
 		VolumeModeEnum,            // RuntimeStatic bool replaced by EDDGIVolumeMode enum
 	};
 
@@ -1208,16 +1170,12 @@ static void LoadBakeIntoLoadContext(UDDGIBakeDataAsset* Bake, FDDGITextureLoadCo
 	Bake->Distance.ToTexturePixels(Ctx.Distance);
 	Bake->Offsets.ToTexturePixels(Ctx.Offsets);
 	Bake->States.ToTexturePixels(Ctx.States);
-	if (Bake->SGAmplitudes.Desc.Width > 0)
-		Bake->SGAmplitudes.ToTexturePixels(Ctx.SGAmplitudes);
 
 	FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
 	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Irradiance, (EPixelFormat)Ctx.Irradiance.Desc.PixelFormat);
 	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Distance, (EPixelFormat)Ctx.Distance.Desc.PixelFormat);
 	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.Offsets, (EPixelFormat)Ctx.Offsets.Desc.PixelFormat);
 	CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.States, (EPixelFormat)Ctx.States.Desc.PixelFormat);
-	if (Ctx.SGAmplitudes.Desc.Width > 0)
-		CreateRHITextureFromBakePixels_RenderThread(RHICmdList, Ctx.SGAmplitudes, (EPixelFormat)Ctx.SGAmplitudes.Desc.PixelFormat);
 	Ctx.ReadyForLoad = true;
 }
 
@@ -1316,16 +1274,8 @@ if (Ar.IsSaving())
 			// Probe data can be optionally not saved depending on project settings.
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
 			bool bProbesSerialized = bSeralizeProbesIsOptional ? GetDefault<URTXGIPluginSettings>()->SerializeProbes : true;
-			FDDGITexturePixels Irradiance, Distance, Offsets, States, SGAmplitudes;
+			FDDGITexturePixels Irradiance, Distance, Offsets, States;
 
-			// ponytail: SG amplitude atlas is saved alongside the four octa probe textures when
-			// (a) the archive supports the SG section (CustomVer >= SaveLoadSGAmplitudes),
-			// (b) the volume has bSGEnabled, and
-			// (c) we actually captured non-empty pixels (RT readback succeeded or load-context passthrough).
-			// Declared outside the bProbesSerialized block so the post-texture write below can see them
-			// even when bProbesSerialized was flipped to false by a failed readback.
-			FDDGITexturePixels SGAmplitudesToSave;
-			bool bSaveSGThisVolume = false;
 
 if (bProbesSerialized)
 			{
@@ -1335,20 +1285,18 @@ if (bProbesSerialized)
 				{
 					// Copy textures to CPU accessible texture resources
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep1)(
-						[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, proxy](FRHICommandListImmediate& RHICmdList)
+					[&Irradiance, &Distance, &Offsets, &States, proxy](FRHICommandListImmediate& RHICmdList)
 						{
 #if ENGINE_MAJOR_VERSION < 5
 							Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetTargetableRHI());
 							Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetTargetableRHI());
 							Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetTargetableRHI() : nullptr);
 							States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetTargetableRHI() : nullptr);
-							SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
 #else
 							Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetRHI());
 							Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetRHI());
 							Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetRHI() : nullptr);
 							States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetRHI() : nullptr);
-							SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetRHI() : nullptr);
 #endif
 						}
 					);
@@ -1356,21 +1304,13 @@ if (bProbesSerialized)
 
 					// Read the GPU texture data to CPU memory
 					bool bReadbackSucceeded = false;
-					bool bSGReadbackSucceeded = false;
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep2)(
-						[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackSucceeded, &bSGReadbackSucceeded](FRHICommandListImmediate& RHICmdList)
+						[&Irradiance, &Distance, &Offsets, &States, &bReadbackSucceeded](FRHICommandListImmediate& RHICmdList)
 						{
 							const bool bIrradianceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance, TEXT("Irradiance"));
 							const bool bDistanceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Distance, TEXT("Distance"));
 							GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets, TEXT("Offsets"));
 							GetTexturePixelsStep2_RenderThread(RHICmdList, States, TEXT("States"));
-							// SG readback is best-effort: a null/empty atlas (bSGEnabled=false or just
-							// reallocated) yields an empty FDDGITexturePixels and we silently skip the
-							// SG section on save. Step2 returns false on empty input which we ignore.
-							if (SGAmplitudes.PendingReadback)
-							{
-								bSGReadbackSucceeded = GetTexturePixelsStep2_RenderThread(RHICmdList, SGAmplitudes, TEXT("SGAmplitudes"));
-							}
 							bReadbackSucceeded = bIrradianceReady && bDistanceReady;
 						}
 					);
@@ -1382,11 +1322,6 @@ if (bProbesSerialized)
 						bProbesSerialized = false;
 					}
 
-					// Capture the SG readback outcome for the post-texture write below.
-					// bSGEnabled is a UPROPERTY serialized by Super::Serialize, so its value here
-					// reflects the panel state at save time.
-					bSaveSGThisVolume = bSGEnabled && bSGReadbackSucceeded && HasRequiredTexturePixels(SGAmplitudes);
-					SGAmplitudesToSave = MoveTemp(SGAmplitudes);
 				}
 				else
 				{
@@ -1396,13 +1331,6 @@ if (bProbesSerialized)
 					States = LoadContext.States;
 					bProbesSerialized = HasRequiredTexturePixels(Irradiance) && HasRequiredTexturePixels(Distance);
 
-					// ponytail: passthrough path — preserve the SG atlas captured at load time
-					// so a proxy recreated without an intervening RT update still has the SG data.
-					bSaveSGThisVolume = bSGEnabled && HasRequiredTexturePixels(LoadContext.SGAmplitudes);
-					if (bSaveSGThisVolume)
-					{
-						SGAmplitudesToSave = LoadContext.SGAmplitudes; // struct copy
-					}
 				}
 			}
 
@@ -1416,20 +1344,14 @@ if (bSeralizeProbesIsOptional)
 			SaveFDDGITexturePixels(Ar, Offsets, bSaveFormat);
 			SaveFDDGITexturePixels(Ar, States, bSaveFormat);
 
-			// ponytail: SG amplitude section follows the four octa textures, gated by a bool flag
-			// so older archives (CustomVer < SaveLoadSGAmplitudes) and SG-disabled volumes both
-			// skip it cleanly. The CustomVer gate is checked once here; older loaders never reach
-			// this branch because they fall into the SaveLoadProbeDataIsOptional else above.
+			// Consume/write legacy SG section slot without storing SG data
 			if (Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadSGAmplitudes)
 			{
-				Ar << bSaveSGThisVolume;
-				if (bSaveSGThisVolume)
-				{
-					SaveFDDGITexturePixels(Ar, SGAmplitudesToSave, bSaveFormat);
-				}
+				bool bSaveSG = false;
+				Ar << bSaveSG;
 			}
 		}
-	}
+		}
 		else if (Ar.IsLoading())
 		{
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
@@ -1449,21 +1371,17 @@ if (bProbesSerialized)
 				LoadFDDGITexturePixels(Ar, LoadContext.Offsets, FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatOffsets, bLoadFormat);
 				LoadFDDGITexturePixels(Ar, LoadContext.States, FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatStates, bLoadFormat);
 
-				// ponytail: SG amplitude section mirrors the save order — read the bool flag first,
-				// then the texture pixels if the flag is true. Older archives (CustomVer < SaveLoadSGAmplitudes)
-				// never reach this branch, so no SG data is consumed. bSGEnabled/SGPrecision are UPROPERTYs
-				// already loaded by Super::Serialize, so the expected format is known here. A format or
-				// dimension mismatch causes LoadFDDGITexturePixels to early-out cleanly (no half-built texture).
+				// Discard legacy SG amplitude payload if present (stream must still be consumed)
 				if (Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadSGAmplitudes)
 				{
 					bool bLoadSG = false;
 					Ar << bLoadSG;
 					if (bLoadSG)
 					{
-						EPixelFormat ExpectedSGFormat = (SGPrecision == 1)
-							? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth
-							: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
-						LoadFDDGITexturePixels(Ar, LoadContext.SGAmplitudes, ExpectedSGFormat, bLoadFormat);
+						// ponytail: archive-only skip — do not allocate RHI for dead SG data
+						uint32 W=0,H=0,Stride=0; TArray<uint8> Pixels; uint32 Fmt=0;
+						Ar << W; Ar << H; Ar << Stride; Ar << Pixels;
+						if (bLoadFormat) Ar << Fmt;
 					}
 				}
 
@@ -1564,18 +1482,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 		ComponentData.LightingMultiplier = LightMultiplier;
 		ComponentData.Mode = VolumeMode;
 		ComponentData.SkyLightTypeOnRayMiss = SkyLightTypeOnRayMiss;
-		const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
-		ComponentData.bSGEnabled = bSGEnabled || bGlobalSGEnabled;
-		// ponytail: SGLightingMode CVar hot-reload is handled by RenderDiffuseIndirectLight_RenderThread.
-		// ComponentData carries the panel value only, served as the fallback when CVar=-1.
-		ComponentData.SGLightingMode = FMath::Clamp(SGLightingMode, 0, 5);
-		const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
-		ComponentData.SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : SGLobeCount, 4, 32);
-		ComponentData.SGPrecision = FMath::Clamp(bGlobalSGEnabled ? CVarSGPrecision.GetValueOnGameThread() : SGPrecision, 0, 1);
-		ComponentData.bSGDiffuseEnabled = bSGDiffuseEnabled && CVarSGDiffuse.GetValueOnGameThread();
-		ComponentData.bSGSpecularEnabled = bSGSpecularEnabled && CVarSGSpecular.GetValueOnGameThread();
-		ComponentData.SGHysteresis = FMath::Clamp(bGlobalSGEnabled ? CVarSGHysteresis.GetValueOnGameThread() : SGHysteresis, 0.0f, 1.0f);
-		ComponentData.SGSpecularMinRoughness = FMath::Clamp(bGlobalSGEnabled ? CVarSGSpecularMinRoughness.GetValueOnGameThread() : SGSpecularMinRoughness, -1.0f, 1.0f);
+		ComponentData.SkyVisibilityIntensity = FMath::Clamp(SkyVisibilityIntensity, 0.0f, 1.0f);
 
 		if (ScrollProbesInfinitely)
 		{
@@ -1673,10 +1580,7 @@ void UDDGIVolumeComponent::UpdateRenderThreadData()
 				bool needReallocate =
 					DDGIProxy->ComponentData.ProbeCounts != ComponentData.ProbeCounts ||
 					DDGIProxy->ComponentData.RaysPerProbe != ComponentData.RaysPerProbe ||
-					DDGIProxy->ComponentData.EnableProbeRelocation != ComponentData.EnableProbeRelocation ||
-					DDGIProxy->ComponentData.bSGEnabled != ComponentData.bSGEnabled ||
-					DDGIProxy->ComponentData.SGLobeCount != ComponentData.SGLobeCount ||
-					DDGIProxy->ComponentData.SGPrecision != ComponentData.SGPrecision;
+				DDGIProxy->ComponentData.EnableProbeRelocation != ComponentData.EnableProbeRelocation;
 		
 				// Now assign the new data
 				DDGIProxy->ComponentData = ComponentData;
@@ -1730,13 +1634,6 @@ static bool ValidateBakeMetadata(const UDDGIBakeDataAsset* Bake, const UDDGIVolu
 		return false;
 	}
 
-	// Validate SGLobeCount when SG is enabled — mismatch causes extent mismatch on SGAmplitudes texture
-	if (VolumeConfig.bSGEnabled && Bake->SGLobeCount != VolumeConfig.SGLobeCount)
-	{
-		OutError = FString::Printf(TEXT("Bake SG lobe count mismatch (bake=%d, volume=%d)"),
-			Bake->SGLobeCount, VolumeConfig.SGLobeCount);
-		return false;
-	}
 
 	// Validate pixel formats for textures that have data
 	auto CheckFormat = [&](const FDDGIBakeTexturePayload& Payload, EPixelFormat ExpectedFormat, const TCHAR* Name) -> bool
@@ -1758,15 +1655,11 @@ static bool ValidateBakeMetadata(const UDDGIBakeDataAsset* Bake, const UDDGIVolu
 	EPixelFormat ExpectedDistanceFmt = (DistanceBits == EDDGIDistanceBits::n32)
 		? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceHighBitDepth
 		: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatDistanceLowBitDepth;
-	EPixelFormat ExpectedSGAmplFmt = (Comp->SGPrecision == 1)
-		? FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesHighBitDepth
-		: FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatSGAmplitudesLowBitDepth;
 
 	if (!CheckFormat(Bake->Irradiance, ExpectedIrradianceFmt, TEXT("Irradiance"))) return false;
 	if (!CheckFormat(Bake->Distance,   ExpectedDistanceFmt,   TEXT("Distance")))   return false;
 	if (!CheckFormat(Bake->Offsets,    FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatOffsets, TEXT("Offsets"))) return false;
 	if (!CheckFormat(Bake->States,     FDDGIVolumeSceneProxy::FComponentData::c_pixelFormatStates,  TEXT("States")))  return false;
-	if (!CheckFormat(Bake->SGAmplitudes, ExpectedSGAmplFmt,   TEXT("SGAmplitudes"))) return false;
 
 	return true;
 }
@@ -1843,11 +1736,6 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 	VolumeConfig.ProbeCounts = ProbeCounts;
 	VolumeConfig.EnableProbeRelocation = ProbeRelocation.AutomaticProbeRelocation;
 	VolumeConfig.RaysPerProbe = RaysPerProbe;
-	VolumeConfig.bSGEnabled = bSGEnabled || CVarSGEnable.GetValueOnGameThread();
-	// SGLobeCount must match the clamped CVar-aware logic used in UpdateRenderThreadData (line 1528)
-	// and DDGIBakeCurrent (line 2102), or bake→validate round-trips break under CVar overrides.
-	const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
-	VolumeConfig.SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : SGLobeCount, 4, 32);
 
 	FString ValidationError;
 	if (!ValidateBakeMetadata(NextBakeAsset, this, VolumeConfig, ValidationError))
@@ -1898,20 +1786,18 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 		FDDGIVolumeSceneProxy* Proxy = SceneProxy;
 
 		// Convert bake payloads to pixel data for the render thread command
-		FDDGITexturePixels CurrentTex[4]; // [0]=Irradiance, [1]=Distance, [2]=Offsets, [3]=SGAmplitudes
-		FDDGITexturePixels NextTex[4];
+		FDDGITexturePixels CurrentTex[3]; // [0]=Irradiance, [1]=Distance, [2]=Offsets
+		FDDGITexturePixels NextTex[3];
 		FDDGITexturePixels CurrentStates;
 
 		if (Current->Irradiance.Desc.Width > 0)  Current->Irradiance.ToTexturePixels(CurrentTex[0]);
 		if (Current->Distance.Desc.Width > 0)    Current->Distance.ToTexturePixels(CurrentTex[1]);
 		if (Current->Offsets.Desc.Width > 0)     Current->Offsets.ToTexturePixels(CurrentTex[2]);
-		if (Current->SGAmplitudes.Desc.Width > 0) Current->SGAmplitudes.ToTexturePixels(CurrentTex[3]);
 		if (Current->States.Desc.Width > 0)       Current->States.ToTexturePixels(CurrentStates);
 
 		if (Next->Irradiance.Desc.Width > 0)  Next->Irradiance.ToTexturePixels(NextTex[0]);
 		if (Next->Distance.Desc.Width > 0)    Next->Distance.ToTexturePixels(NextTex[1]);
 		if (Next->Offsets.Desc.Width > 0)     Next->Offsets.ToTexturePixels(NextTex[2]);
-		if (Next->SGAmplitudes.Desc.Width > 0) Next->SGAmplitudes.ToTexturePixels(NextTex[3]);
 
 		const float StartTime = FApp::GetCurrentTime();
 		const float BlendDur = BlendDuration;
@@ -1933,14 +1819,12 @@ void UDDGIVolumeComponent::SetNextBake(UDDGIBakeDataAsset* NextBakeAsset, float 
 			Proxy->CurrentBakeSRVs[0] = CreateSRV(CurrentTex[0]);
 			Proxy->CurrentBakeSRVs[1] = CreateSRV(CurrentTex[1]);
 			Proxy->CurrentBakeSRVs[2] = CreateSRV(CurrentTex[2]);
-			Proxy->CurrentBakeSRVs[3] = CreateSRV(CurrentTex[3]);
 			Proxy->CurrentBakeStatesSRV = CreateSRV(CurrentStates);
 
 			// Next bake SRVs
 			Proxy->NextBakeSRVs[0] = CreateSRV(NextTex[0]);
 			Proxy->NextBakeSRVs[1] = CreateSRV(NextTex[1]);
 			Proxy->NextBakeSRVs[2] = CreateSRV(NextTex[2]);
-			Proxy->NextBakeSRVs[3] = CreateSRV(NextTex[3]);
 
 				// Activate crossfade
 				Proxy->BakeBlendStartTime = StartTime;
@@ -1963,9 +1847,26 @@ void UDDGIVolumeComponent::EnableVolumeComponent(bool enabled)
 	MarkRenderDynamicDataDirty();
 }
 
+// 强制触达 WorldSubsystem，确保插件反射/加载顺序异常时仍会创建 ViewExtension
+static FDelegateHandle GDDGISkyVisWorldInitHandle;
+
+static void EnsureSkyVisibilitySubsystem(UWorld* World, const UWorld::InitializationValues)
+{
+	if (World && !World->bIsTearingDown)
+	{
+		// GetSubsystem 会创建已注册且 ShouldCreateSubsystem==true 的子系统
+		World->GetSubsystem<UDDGISkyVisibilitySubsystem>();
+	}
+}
+
 void UDDGIVolumeComponent::Startup()
 {
 	FDDGIVolumeSceneProxy::OnPreWorldFinishDestroyHandle = FWorldDelegates::OnPreWorldFinishDestroy.AddStatic(FDDGIVolumeSceneProxy::HandlePreWorldFinishDestroy);
+
+	if (!GDDGISkyVisWorldInitHandle.IsValid())
+	{
+		GDDGISkyVisWorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddStatic(EnsureSkyVisibilitySubsystem);
+	}
 
 	FGlobalIlluminationPluginDelegates::FRenderDiffuseIndirectLight& RDILDelegate = FGlobalIlluminationPluginDelegates::RenderDiffuseIndirectLight();
 	FDDGIVolumeSceneProxy::RenderDiffuseIndirectLightHandle = RDILDelegate.AddStatic(FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread);
@@ -1980,6 +1881,12 @@ void UDDGIVolumeComponent::Shutdown()
 {
 	check(FDDGIVolumeSceneProxy::OnPreWorldFinishDestroyHandle.IsValid());
 	FWorldDelegates::OnPreWorldFinishDestroy.Remove(FDDGIVolumeSceneProxy::OnPreWorldFinishDestroyHandle);
+
+	if (GDDGISkyVisWorldInitHandle.IsValid())
+	{
+		FWorldDelegates::OnPostWorldInitialization.Remove(GDDGISkyVisWorldInitHandle);
+		GDDGISkyVisWorldInitHandle = FDelegateHandle();
+	}
 
 	FGlobalIlluminationPluginDelegates::FRenderDiffuseIndirectLight& RDILDelegate = FGlobalIlluminationPluginDelegates::RenderDiffuseIndirectLight();
 	check(FDDGIVolumeSceneProxy::RenderDiffuseIndirectLightHandle.IsValid());
@@ -2127,24 +2034,22 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 		EffectiveName = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 	}
 
-	// Read back all 5 live GPU textures — mirrors the Serialize() readback pattern
-	FDDGITexturePixels Irradiance, Distance, Offsets, States, SGAmplitudes;
+	// Read back all 4 live GPU textures — mirrors the Serialize() readback pattern
+	FDDGITexturePixels Irradiance, Distance, Offsets, States;
 
 	ENQUEUE_RENDER_COMMAND(DDGIBakeStep1)(
-		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, proxy](FRHICommandListImmediate& RHICmdList)
+		[&Irradiance, &Distance, &Offsets, &States, proxy](FRHICommandListImmediate& RHICmdList)
 		{
 #if ENGINE_MAJOR_VERSION < 5
 			Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetTargetableRHI());
 			Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetTargetableRHI());
 			Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetTargetableRHI() : nullptr);
 			States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetTargetableRHI() : nullptr);
-			SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
 #else
 			Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesIrradiance->GetRHI());
 			Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesDistance->GetRHI());
 			Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesOffsets ? proxy->ProbesOffsets->GetRHI() : nullptr);
 			States = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesStates ? proxy->ProbesStates->GetRHI() : nullptr);
-			SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, proxy->ProbesSGAmplitudes ? proxy->ProbesSGAmplitudes->GetRHI() : nullptr);
 #endif
 		}
 	);
@@ -2153,13 +2058,12 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 	// Step 2: read the GPU texture data to CPU memory
 	bool bReadbackOk = false;
 	ENQUEUE_RENDER_COMMAND(DDGIBakeStep2)(
-		[&Irradiance, &Distance, &Offsets, &States, &SGAmplitudes, &bReadbackOk](FRHICommandListImmediate& RHICmdList)
+		[&Irradiance, &Distance, &Offsets, &States, &bReadbackOk](FRHICommandListImmediate& RHICmdList)
 		{
 			const bool bIrrOK = GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance, TEXT("BakeIrradiance"));
 			const bool bDistOK = GetTexturePixelsStep2_RenderThread(RHICmdList, Distance, TEXT("BakeDistance"));
 			GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets, TEXT("BakeOffsets"));
 			GetTexturePixelsStep2_RenderThread(RHICmdList, States, TEXT("BakeStates"));
-			GetTexturePixelsStep2_RenderThread(RHICmdList, SGAmplitudes, TEXT("BakeSGAmplitudes"));
 			bReadbackOk = bIrrOK && bDistOK;
 		}
 	);
@@ -2179,19 +2083,11 @@ UDDGIBakeDataAsset* UDDGIVolumeComponent::BakeCurrentState(const FString& BakeNa
 	BakeAsset->bEnableProbeRelocation = ProbeRelocation.AutomaticProbeRelocation;
 	BakeAsset->bEnableProbeScrolling = ScrollProbesInfinitely;
 
-	// SG metadata — matches the CVar logic in UpdateRenderThreadData
-	const bool bGlobalSGEnabled = CVarSGEnable.GetValueOnGameThread();
-	const int32 SGLobeCountOverride = CVarSGLobeCount.GetValueOnGameThread();
-	BakeAsset->SGLobeCount = FMath::Clamp((SGLobeCountOverride >= 0) ? SGLobeCountOverride : (int32)SGLobeCount, 4, 32);
 
 	BakeAsset->Irradiance.FromTexturePixels(Irradiance);
 	BakeAsset->Distance.FromTexturePixels(Distance);
 	BakeAsset->Offsets.FromTexturePixels(Offsets);
 	BakeAsset->States.FromTexturePixels(States);
-	if (SGAmplitudes.Desc.Width > 0)
-	{
-		BakeAsset->SGAmplitudes.FromTexturePixels(SGAmplitudes);
-	}
 
 	// Save the asset to <MapName>/DDGIBakes/
 	UWorld* World = GetWorld();
@@ -2292,16 +2188,11 @@ void UDDGIVolumeComponent::DestroyRenderState_Concurrent()
 						ComponentLoadContext.Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesDistance->GetTargetableRHI());
 						ComponentLoadContext.Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesOffsets ? DDGIProxy->ProbesOffsets->GetTargetableRHI() : nullptr);
 						ComponentLoadContext.States = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesStates ? DDGIProxy->ProbesStates->GetTargetableRHI() : nullptr);
-						// ponytail: SG atlas saveback — null-safe like Offsets/States. If SG was disabled
-						// on this proxy the atlas is null and we capture an empty FDDGITexturePixels,
-						// which LoadVolumeTextures_RenderThread will skip via its null Texture guard.
-						ComponentLoadContext.SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesSGAmplitudes ? DDGIProxy->ProbesSGAmplitudes->GetTargetableRHI() : nullptr);
 #else
 						ComponentLoadContext.Irradiance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesIrradiance->GetRHI());
 						ComponentLoadContext.Distance = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesDistance->GetRHI());
 						ComponentLoadContext.Offsets = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesOffsets ? DDGIProxy->ProbesOffsets->GetRHI() : nullptr);
 						ComponentLoadContext.States = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesStates ? DDGIProxy->ProbesStates->GetRHI() : nullptr);
-						ComponentLoadContext.SGAmplitudes = GetTexturePixelsStep1_RenderThread(RHICmdList, DDGIProxy->ProbesSGAmplitudes ? DDGIProxy->ProbesSGAmplitudes->GetRHI() : nullptr);
 #endif
 					}
 				}
