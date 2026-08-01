@@ -25,6 +25,7 @@
 #include "SceneRendering.h"
 #include "DeferredShadingRenderer.h"
 #include "ScenePrivate.h"
+#include "DDGIUtilities.h"
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 
@@ -349,7 +350,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectVisualizations_RenderThread(
 PassParameters->ProbeIrradianceTexture = GraphBuilder.RegisterExternalTexture(proxy->ProbesIrradiance);
 		PassParameters->ProbeDistanceTexture = GraphBuilder.RegisterExternalTexture(proxy->ProbesDistance);
 		PassParameters->ProbeOffsets = RegisterExternalTextureWithFallback(GraphBuilder, proxy->ProbesOffsets, GSystemTextures.BlackDummy);
-		PassParameters->ProbeStates = RegisterExternalTextureWithFallback(GraphBuilder, proxy->ProbesStates, GSystemTextures.BlackDummy);
+		PassParameters->ProbeStates = DDGIRegisterProbeStatesOrActiveDummy(GraphBuilder, proxy->ProbesStates);
 		PassParameters->ProbeRadius = probeRadius;
 		PassParameters->DepthScale = depthScale;
 		PassParameters->WorldToClip = static_cast<FMatrix44f>(View.ViewMatrices.GetViewProjectionMatrix());

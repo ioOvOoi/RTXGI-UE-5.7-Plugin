@@ -1,5 +1,6 @@
 #include "DDGISkyVisibilityViewExtension.h"
 #include "DDGIVolumeComponent.h"
+#include "DDGIUtilities.h"
 #include "LegacyEngineCompat.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
@@ -28,14 +29,6 @@ namespace
 		return GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 	}
 
-	// ProbeStates 是 Texture2D<uint>；BlackDummy 是 float。绑 R8_UINT=0 (=PROBE_STATE_ACTIVE) 避免未定义读取
-	static FRDGTextureRef MakeActiveProbeStatesDummy(FRDGBuilder& GraphBuilder)
-	{
-		FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(FIntPoint(1, 1), PF_R8_UINT, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
-		FRDGTextureRef Tex = GraphBuilder.CreateTexture(Desc, TEXT("DDGI.SkyVis.StatesActiveDummy"));
-		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Tex), 0u);
-		return Tex;
-	}
 
 	static bool IsSkyVisibilityEnabled()
 	{
@@ -246,7 +239,8 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 	TArray<FProxyEntry, TInlineAllocator<GMaxSkyVisVolumes>> Volumes;
 	for (FDDGIVolumeSceneProxy* Proxy : FDDGIVolumeSceneProxy::AllProxiesReadyForRender_RenderThread)
 	{
-		if (!Proxy || Proxy->OwningScene != Scene || !Proxy->ProbesDistance.IsValid())
+		// 与 ApplyLighting 列表对齐：本 Scene、启用 volume、有 distance、sky vis intensity>0
+		if (!Proxy || Proxy->OwningScene != Scene || !Proxy->ComponentData.EnableVolume || !Proxy->ProbesDistance.IsValid())
 		{
 			continue;
 		}
@@ -354,7 +348,7 @@ void FDDGISkyVisibilityViewExtension::PostRenderBasePassDeferred_RenderThread(
 		PassParameters->SkyVisOutput = GraphBuilder.CreateUAV(SkyVisRT);
 
 		FRDGTextureRef Black = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
-		FRDGTextureRef StatesActiveDummy = MakeActiveProbeStatesDummy(GraphBuilder);
+		FRDGTextureRef StatesActiveDummy = DDGICreateActiveProbeStatesDummy(GraphBuilder);
 
 		auto BindVolume = [&](int32 Index, FDDGIVolumeSceneProxy* Proxy, const FVector4f& Rotation, const FVector3f& Scale)
 		{

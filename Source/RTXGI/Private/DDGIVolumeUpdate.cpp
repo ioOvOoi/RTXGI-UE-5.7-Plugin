@@ -38,6 +38,7 @@
 // local includes
 #include "BuiltInRayTracingShaders.h"
 #include "DDGIVolumeComponent.h"
+#include "DDGIUtilities.h"
 #include "DDGIVolumeDescGPU.h"
 #include "LegacyEngineCompat.h"
 #include "RayTracing/RayTracingLighting.h"
@@ -1444,7 +1445,7 @@ void DebugShaderPlatformsDetailed()
 			PassParameters->DDGIVolume_ProbeIrradiance = GraphBuilder.RegisterExternalTexture(VolProxy->ProbesIrradiance);
 			PassParameters->DDGIVolume_ProbeDistance = GraphBuilder.RegisterExternalTexture(VolProxy->ProbesDistance);
 			PassParameters->DDGIVolume_ProbeOffsets = RegisterExternalTextureWithFallback(GraphBuilder, VolProxy->ProbesOffsets, GSystemTextures.BlackDummy);
-			PassParameters->DDGIVolume_ProbeStates = RegisterExternalTextureWithFallback(GraphBuilder, VolProxy->ProbesStates, GSystemTextures.BlackDummy);
+			PassParameters->DDGIVolume_ProbeStates = DDGIRegisterProbeStatesOrActiveDummy(GraphBuilder, VolProxy->ProbesStates);
 			PassParameters->DDGIVolume_LinearClampSampler = TStaticSamplerState<SF_Trilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
 			PassParameters->DDGIVolume_Radius = static_cast<FVector3f>(VolProxy->ComponentData.Transform.GetScale3D()) * 100.0f;
@@ -1583,7 +1584,7 @@ void DebugShaderPlatformsDetailed()
 
 		PassParameters->DDGIVolumeRayDataUAV = ProbesRadianceUAV;
 		PassParameters->DDGIVolumeProbeDataUAV = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesIrradiance));
-		PassParameters->DDGIVolumeProbeStatesTexture = RegisterExternalTextureWithFallback(GraphBuilder, VolProxy->ProbesStates, GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolumeProbeStatesTexture = DDGIRegisterProbeStatesOrActiveDummy(GraphBuilder, VolProxy->ProbesStates);
 
 		if (VolProxy->ComponentData.EnableProbeScrolling)
 			PassParameters->DDGIProbeScrollSpace = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSpace));
@@ -1658,7 +1659,7 @@ void DebugShaderPlatformsDetailed()
 
 		PassParameters->DDGIVolumeRayDataUAV = ProbesRadianceUAV;
 		PassParameters->DDGIVolumeProbeDataUAV = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesDistance));
-		PassParameters->DDGIVolumeProbeStatesTexture = RegisterExternalTextureWithFallback(GraphBuilder, VolProxy->ProbesStates, GSystemTextures.BlackDummy);
+		PassParameters->DDGIVolumeProbeStatesTexture = DDGIRegisterProbeStatesOrActiveDummy(GraphBuilder, VolProxy->ProbesStates);
 
 		if (VolProxy->ComponentData.EnableProbeScrolling)
 			PassParameters->DDGIProbeScrollSpace = GraphBuilder.CreateUAV(GraphBuilder.RegisterExternalTexture(VolProxy->ProbesSpace));

@@ -9,6 +9,8 @@
 */
 
 #include "../Public/DDGIUtilities.h"
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
 
 //Implementation from FLatentGPUTimer from ScenePrivate.h / RendererScene.cpp
 FLatentGPUTimerDDGI::FLatentGPUTimerDDGI(FRenderQueryPoolRHIRef InTimerQueryPool)
@@ -140,3 +142,26 @@ float FLatentGPUTimerDDGI::GetAverageTimeMS()
 {
 	return TotalTime / AvgSamples;
 }
+
+FRDGTextureRef DDGICreateActiveProbeStatesDummy(FRDGBuilder& GraphBuilder)
+{
+	// ponytail: 每 GraphBuilder 一份 1x1；比全局池简单，无跨帧生命周期问题
+	FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
+		FIntPoint(1, 1),
+		PF_R8_UINT,
+		FClearValueBinding::Black,
+		TexCreate_ShaderResource | TexCreate_UAV);
+	FRDGTextureRef Tex = GraphBuilder.CreateTexture(Desc, TEXT("DDGI.ProbeStates.ActiveDummy"));
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Tex), 0u);
+	return Tex;
+}
+
+FRDGTextureRef DDGIRegisterProbeStatesOrActiveDummy(FRDGBuilder& GraphBuilder, const TRefCountPtr<IPooledRenderTarget>& ProbesStates)
+{
+	if (ProbesStates.IsValid())
+	{
+		return GraphBuilder.RegisterExternalTexture(ProbesStates);
+	}
+	return DDGICreateActiveProbeStatesDummy(GraphBuilder);
+}
+

@@ -9,6 +9,7 @@
 */
 
 #include "DDGIVolumeComponent.h"
+#include "DDGIUtilities.h"
 #include "DDGISkyVisibilitySubsystem.h"
 #include "DDGIVolume.h"
 #include "DDGIVolumeUpdate.h"
@@ -716,7 +717,10 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			FQuat4f   ProxyRotation = volumeProxy->ComponentData.Transform.GetRotation();
 			FVector3f ProxyScale = volumeProxy->ComponentData.Transform.GetScale3D();
 
-			float ProxyDensity = float(volumeProxy->ComponentData.ProbeCounts.X * volumeProxy->ComponentData.ProbeCounts.Y * volumeProxy->ComponentData.ProbeCounts.Z) / (ProxyScale.X * ProxyScale.Y * ProxyScale.Z);
+			// 与 sky-vis 一致：Scale*200 为世界尺寸，密度仅排序用
+			const FVector3f WorldSize = ProxyScale * 200.0f;
+			float ProxyDensity = float(volumeProxy->ComponentData.ProbeCounts.X * volumeProxy->ComponentData.ProbeCounts.Y * volumeProxy->ComponentData.ProbeCounts.Z)
+				/ FMath::Max(WorldSize.X * WorldSize.Y * WorldSize.Z, KINDA_SMALL_NUMBER);
 			uint32 ProxyLightingChannelMask =
 				(volumeProxy->ComponentData.LightingChannels.bChannel0 ? 1 : 0) |
 				(volumeProxy->ComponentData.LightingChannels.bChannel1 ? 2 : 0) |
@@ -802,10 +806,12 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 			PassParameters->ShouldUsePreExposure = View.Family->EngineShowFlags.Tonemapper;
 			PassParameters->NumVolumes = numVolumes;
 			// 仅当 CVar 开且本帧 shading volume 中至少有一个开启 sky vis 时，reader 才调制
+			// 与 ViewExtension writer 条件对齐：有 distance、intensity>0（列表内已是本 Scene / 视锥内）
 			bool bAnySkyVisVolume = false;
 			for (int32 si = 0; si < volumes.Num(); ++si)
 			{
-				if (volumes[si].proxy && volumes[si].proxy->ComponentData.SkyVisibilityIntensity > 0.0f)
+				const FDDGIVolumeSceneProxy* P = volumes[si].proxy;
+				if (P && P->ProbesDistance.IsValid() && P->ComponentData.SkyVisibilityIntensity > 0.0f)
 				{
 					bAnySkyVisVolume = true;
 					break;
@@ -834,7 +840,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				PassParameters->DDGIVolume[volumeIndex].ProbeIrradiance = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesIrradiance);
 				PassParameters->DDGIVolume[volumeIndex].ProbeDistance = GraphBuilder.RegisterExternalTexture(volumeProxy->ProbesDistance);
 				PassParameters->DDGIVolume[volumeIndex].ProbeOffsets = RegisterExternalTextureWithFallback(GraphBuilder, volumeProxy->ProbesOffsets, GSystemTextures.BlackDummy);
-				PassParameters->DDGIVolume[volumeIndex].ProbeStates = RegisterExternalTextureWithFallback(GraphBuilder, volumeProxy->ProbesStates, GSystemTextures.BlackDummy);
+				PassParameters->DDGIVolume[volumeIndex].ProbeStates = DDGIRegisterProbeStatesOrActiveDummy(GraphBuilder, volumeProxy->ProbesStates);
 
 				// Set the volume parameters
 				PassParameters->DDGIVolume[volumeIndex].Position = volumeProxy->ComponentData.Origin;
@@ -900,7 +906,7 @@ void FDDGIVolumeSceneProxy::RenderDiffuseIndirectLight_RenderThread(
 				PassParameters->DDGIVolume[volumeIndex].ProbeIrradiance = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 				PassParameters->DDGIVolume[volumeIndex].ProbeDistance = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
 				PassParameters->DDGIVolume[volumeIndex].ProbeOffsets = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
-				PassParameters->DDGIVolume[volumeIndex].ProbeStates = GraphBuilder.RegisterExternalTexture(GSystemTextures.BlackDummy);
+				PassParameters->DDGIVolume[volumeIndex].ProbeStates = DDGICreateActiveProbeStatesDummy(GraphBuilder);
 			}
 
 			if (CVarLightingPassScale.GetValueOnRenderThread() == 1.0f)
